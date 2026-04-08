@@ -10,6 +10,33 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-3: Forward Map + Newton Status (Apr 8, 2026)
+
+### What Works
+- Forward map runs end-to-end for TypeI Konishi at g=0.1
+- Initial residual ||E|| = 0.227 (float64, QaiShift=2)
+- FD Newton with alpha=0.1 damping: residual decreases 0.227 → 0.207 → 0.185 over 2 iterations
+- AD Jacobian compiles but Python for-loops make it impractically slow (~10 min/iteration)
+
+### Key Findings
+1. **float64 precision limit**: QaiShift > 2 causes growing errors in pulldown (exponential accumulation). C++ uses QaiShift=60 with 186-digit precision. At float64, QaiShift=2 is optimal.
+2. **Jacobian effective rank = 31** (out of 32): one gauge direction is null. Using lstsq with rcond=1e-10 handles this.
+3. **Convergence**: residual decreasing but Delta drifts from reference value — expected since float64 with QaiShift=2 solves a truncated problem.
+
+### Performance Blockers
+- Forward map uses Python for-loops (b-coefficient recursion, pulldown, gluing) → ~30s per evaluation
+- Need vectorization with `jax.lax.scan` for both speed and AD traceability
+- FD Jacobian: 33 evaluations × 30s = 10 min per Newton step
+
+### Next Steps
+1. Vectorize forward map internals (especially b-coefficient recursion and pulldown) using jax.lax.scan/fori_loop
+2. Enable jax.jacfwd for exact AD Jacobian (~100× faster than FD)
+3. Run Newton to convergence and verify Delta matches reference to float64 precision
+4. Add Broyden solver (rank-1 Jacobian updates)
+5. Continuation in g to reproduce full Konishi curve
+
+---
+
 ## Discussion-2: Implementation Plan — TypeI Forward Map First (Apr 8, 2026)
 
 ### Strategy
