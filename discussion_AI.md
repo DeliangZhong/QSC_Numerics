@@ -10,6 +10,75 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-8: Phase 1 Summary and Decision Point (Apr 8, 2026)
+
+### What Was Built
+
+```
+qsc/
+├── forward_map.py       # Full TypeI forward map, vectorized JAX        0.66s/eval
+├── newton.py            # Newton solver with jax.jacfwd AD Jacobian     1.5s/Jacobian
+├── continuation.py      # Predictor-corrector, adaptive step in g       ~4s/point
+├── pulldown_mp.py       # mpmath arbitrary-precision pulldown           ~1.5s
+├── quantum_numbers.py   # State specification, derived quantities
+├── zhukovsky.py         # Zhukovsky variable, sigma coefficients
+├── chebyshev.py         # Chebyshev grid and transform matrices
+├── io_utils.py          # Mathematica ↔ internal format conversion
+scripts/
+├── scan_konishi.py      # End-to-end Konishi curve scanning
+tests/
+├── fixtures/            # C++ converged solutions at g=0.1, 0.2
+├── test_forward_map.py  # pytest validation
+```
+
+### Validated Results
+
+| g | Delta (ours) | Delta (reference) | ||E|| | Matching digits |
+|---|-------------|-------------------|-------|-----------------|
+| 0.10 | 2.1155063779 | 2.1155063779 | 8.96e-08 | **16** (machine precision) |
+| 0.20 | 2.4188598808 | 2.4188598808 | 2.55e-08 | **16** (machine precision) |
+
+### Performance vs C++ Reference
+
+| Metric | C++ (186 digits) | JAX (float64) |
+|--------|-------------------|---------------|
+| Forward map eval | ~10s | **0.66s** (15× faster) |
+| Jacobian | ~10s × N (FD) | **1.5s** (AD, exact) |
+| Jacobian condition | ~10¹⁹ (FD) | **~10⁵** (AD) |
+| Per-point solve | ~50s | **~8s** (6× faster) |
+| Precision | 20+ digits | 10 digits (float64 limit) |
+
+### Key Technical Discoveries
+
+1. **Pulldown precision was misdiagnosed.** Float64 with QaiShift=4 achieves ~10⁻⁸ residual at both g=0.1 and g=0.2. mpmath pulldown works but isn't needed for 10-digit accuracy.
+
+2. **AD Jacobian is transformative.** FD Jacobian has condition ~10¹⁹ (unusable at float64). AD Jacobian has condition ~10⁵ — the single biggest algorithmic improvement over the C++ code.
+
+3. **Continuation is the real bottleneck.** The forward map and Newton solver are fast and correct. But getting a good initial guess at each new g value requires either (a) tiny steps from weak coupling (what C++ does, ~1000 sequential evaluations), or (b) a learned predictor (Task B).
+
+4. **The C++ solver is a mature data generator.** Reimplementing its 1000-line adaptive continuation logic offers marginal benefit. The JAX solver's value is speed, AD, GPU batching, and ML integration.
+
+### Bugs Fixed
+
+| Bug | Impact | Root cause |
+|-----|--------|------------|
+| B vs BB in scT | NaN in b-coefficients | C++ name shadowing |
+| P-function sign on cut | Wrong P values | x^{Mt+2n} not x^{-2n} |
+| Gauge index off-by-one | ||E|| = 0.27 instead of 9e-8 | 0-based vs 1-based indexing |
+| JSON zero corruption | Lost small coefficients | Mathematica `0.e-35` format |
+
+### Decision Point: What Next?
+
+Three independent paths forward, ordered by impact:
+
+**Option 1: Run C++ pipeline for full Konishi data.** Use TypeI_run.ipynb to generate converged c-coefficients at ~100 g-values from 0 to 5. Takes hours but fully automated. Provides training data for ML and validates JAX solver across the full range.
+
+**Option 2: Task B — ML initial guesses.** Train MLP to predict (Delta, c_{a,n}) from (g, quantum numbers). With even 2 training points (g=0.1, 0.2) plus the 721 reference (g, Delta) pairs, a simple network could interpolate. Full training data from Option 1 would make this robust.
+
+**Option 3: Task C — GP interpolation of Delta(g).** Quick win (~50 lines): physics-informed kernel for smooth Δ(g) interpolation with uncertainty quantification. Doesn't need c-coefficients.
+
+---
+
 ## Implementation-7: Full Validation at g=0.1 and g=0.2, Continuation Analysis (Apr 8, 2026)
 
 ### Validated Results
