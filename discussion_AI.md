@@ -10,6 +10,40 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-7: Full Validation at g=0.1 and g=0.2, Continuation Analysis (Apr 8, 2026)
+
+### Validated Results
+
+| g | Delta (ours) | Delta (ref) | ||E|| | Digits |
+|---|-------------|-------------|-------|--------|
+| 0.10 | 2.1155063779 | 2.1155063779 | 8.96e-08 | **16.0** |
+| 0.20 | 2.4188598808 | 2.4188598808 | 2.55e-08 | **16.0** |
+
+Both points achieve **machine-precision agreement** with the C++ reference. The forward map is correct.
+
+### Continuation Difficulty
+
+To generate C++ converged solutions at g > 0.2, the C++ solver needs proper continuation from weak coupling:
+- **Perturbative initial guess** works only up to g ≈ 0.2 (perturbative expansion diverges beyond)
+- **C++ pipeline** starts at g=0.0001 with dg=0.0008 and doubles every 4 successes — reaching g=1.0 requires ~1000+ C++ evaluations
+- **Our JAX continuation** reaches g=0.15 in 9 minutes with adaptive steps — limited by the narrow Newton basin of attraction
+
+### The Path to Full Curve
+
+For generating training data across g ∈ [0, 5]:
+1. **Use the C++ pipeline directly** (TypeI_run.ipynb) — it's designed for this, handles all the adaptive hyperparameters, and produces the full c-coefficient data we need
+2. **Store the output** as JSON fixtures (like konishi_cpp_internal.json)
+3. **Validate each point** with our JAX forward map (confirms 16-digit agreement)
+4. **Train ML predictor** (Task B) on this data to bypass continuation entirely
+
+The C++ solver is a mature production tool optimized for this exact task. Reimplementing its continuation logic from scratch in Python would duplicate ~1000 lines of carefully tuned adaptive code for marginal benefit. The value of our JAX solver is in:
+- **AD Jacobian** (exact, 10⁵× better conditioned than FD)
+- **Speed** (0.66s vs ~10s per C++ evaluation)
+- **GPU batching** (future: vmap over states)
+- **ML integration** (Task B: neural network initial guesses)
+
+---
+
 ## Implementation-6: Precision Bottleneck Misdiagnosed — Continuation Is the Real Problem (Apr 8, 2026)
 
 ### Key Finding
