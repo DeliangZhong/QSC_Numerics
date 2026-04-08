@@ -7,5 +7,6 @@ dist/
 build/
 .ruff_cache/
 CLAUDE.local.md
+.venv/
 *.out
 *_build.cpp
