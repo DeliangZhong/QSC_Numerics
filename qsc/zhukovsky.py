@@ -1,7 +1,6 @@
 """Zhukovsky variable, branch-cut utilities, and sigma coefficients."""
 
 import jax.numpy as jnp
-from jax.scipy.special import gammaln
 
 
 def x_of_u_long(u: jnp.ndarray, g: complex) -> jnp.ndarray:
@@ -31,6 +30,22 @@ def cbinomial(z: complex, n: int) -> complex:
     if n == 0:
         return 1.0 + 0j
     result = 1.0 + 0j
+    for k in range(n):
+        result = result * (z - k) / (k + 1)
+    return result
+
+
+def cbinomial_vec(z: jnp.ndarray, n: int) -> jnp.ndarray:
+    """Vectorized complex binomial coefficient C(z, n) for array z.
+
+    Computes C(z_i, n) for each element z_i in z.
+    Works for complex z array and integer n >= 0.
+    """
+    if n < 0:
+        return jnp.zeros_like(z, dtype=complex)
+    if n == 0:
+        return jnp.ones_like(z, dtype=complex)
+    result = jnp.ones_like(z, dtype=complex)
     for k in range(n):
         result = result * (z - k) / (k + 1)
     return result
@@ -81,21 +96,19 @@ def fsigma(twiceMt: int, n: int, r: int, g: complex) -> complex:
 
 
 def build_sigma_table(twiceMt: jnp.ndarray, N0: int, NQ: int,
-                      g: complex) -> list[jnp.ndarray]:
+                      g: complex) -> jnp.ndarray:
     """Build sigma tables for all 4 P-functions.
 
-    sigma[a][r, n] = fsigma(twiceMt[a], 2*n, r, g)
+    sigma[a, r, n] = fsigma(twiceMt[a], 2*n, r, g)
 
     Note: the C++ sigmasubfunc2 uses n -> 2*n (even indices only for TypeI).
 
-    Returns list of 4 arrays, each of shape (N0+1, NQ+1).
+    Returns array of shape (4, N0+1, NQ+1).
     """
-    tables = []
+    sigma = jnp.zeros((4, N0 + 1, NQ + 1), dtype=complex)
     for a in range(4):
         tMt = int(twiceMt[a])
-        table = jnp.zeros((N0 + 1, NQ + 1), dtype=complex)
         for r in range(N0 + 1):
             for n in range(NQ + 1):
-                table = table.at[r, n].set(fsigma(tMt, 2 * n, r, g))
-        tables.append(table)
-    return tables
+                sigma = sigma.at[a, r, n].set(fsigma(tMt, 2 * n, r, g))
+    return sigma
