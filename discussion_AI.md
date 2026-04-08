@@ -10,6 +10,68 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-5: Phase 2 Plan — Mixed-Precision Pulldown then ML Acceleration (Apr 8, 2026)
+
+### Phase 2 Instructions Received
+
+The user provided a detailed Phase 2 specification with four tasks:
+
+- **Task A (BLOCKING):** Mixed-precision pulldown — replace float64 pulldown with mpmath arbitrary precision. Unlocks g > 0.15.
+- **Task B:** ML-accelerated initial guesses — neural network predictor for Newton starting points.
+- **Task C:** GP interpolation of Δ(g) with physics-informed kernel.
+- **Task D (FUTURE):** Meta-learning for new states at higher Δ₀.
+
+User instruction: **do tasks sequentially, not in parallel.**
+
+### Execution Plan
+
+**Step 1: Task A — Mixed-Precision Pulldown**
+
+The pulldown is the sequential loop in `_evaluate_Q_and_pulldown` (forward_map.py) where Q is propagated from large imaginary u down to the cut via NI matrix multiplications. At float64, QaiShift > 4 accumulates fatal roundoff. The fix:
+
+1. Extract the pulldown into `qsc/pulldown_mp.py` with a clean interface: `pulldown_Q_mp(Q_init, Puj, g, NI, lc, dps=50)`
+2. Implement using mpmath at configurable precision (dps = QaiShift + 15)
+3. Integrate into `forward_map.py` — everything before and after pulldown stays in float64 JAX
+4. For AD: use **Option B** (FD through pulldown only) first for simplicity. The pulldown inputs are the P-function values at shifted points, which depend on c[a][n]. FD at 50-digit precision with step ~10⁻²⁰ gives ~30 accurate derivative digits.
+5. Validate: Konishi at g=0.5 (Δ ≈ 3.713), g=1.0, g=5.0 against reference data
+6. Performance target: pulldown at dps=60, QaiShift=40 should add <100ms overhead
+
+If mpmath is too slow, switch to `python-flint` (FLINT/Arb wrapper, 10-50× faster).
+
+**Step 2: Generate Full Konishi Curve**
+
+With Task A working, scan Konishi Δ(g) from g=0.01 to g=5.0:
+- Use perturbative initial guess for g < 0.1 (extract sbWeak data)
+- Use continuation for g > 0.1 with QaiShift scaling with g
+- Compare all points against reference data (254 points available)
+- Target: 5+ digit accuracy across the full range
+
+**Step 3: Task B — ML Initial Guesses**
+
+Architecture from the spec:
+- Input: (g, Δ₀, nb, nf, na) → ~10 features with positional encoding of g
+- Output: residual on top of perturbative expansion → (8*N_trunc + 1) values
+- Training data: converged solutions from Step 2 + existing reference data
+- Network: MLP 10→256→256→256→(8N+1) with skip connections
+
+**Step 4: Task C — GP Interpolation**
+
+Quick implementation (~50 lines): physics-informed kernel with weak-coupling (g²) and strong-coupling (√g) components. Provides uncertainty quantification for active learning.
+
+### Key Decision: AD Strategy for Mixed-Precision
+
+Option B (FD through pulldown only) is simpler and sufficient:
+- The pulldown's input is `Puj[a, n, k]` — P-function values at NI shifted points
+- These depend on the c-coefficients through P-function evaluation (which is JAX/float64)
+- AD handles `c → Puj` (JAX traceable)
+- FD handles `Puj → Q_at_cut` (mpmath, high precision)
+- AD handles `Q_at_cut → E` (JAX traceable)
+- Chain rule composition gives the full Jacobian
+
+Option A (custom JVP) is more elegant but requires implementing the tangent recurrence in mpmath, which is 2× the code for marginal benefit at this stage.
+
+---
+
 ## Implementation-4: Full Results — Konishi Reproduced, Precision Analysis (Apr 8, 2026)
 
 ### Konishi Results
