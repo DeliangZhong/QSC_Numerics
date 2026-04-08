@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Reimplementation and acceleration of the Quantum Spectral Curve (QSC) numerical solver for planar N=4 Super-Yang-Mills theory. The existing C++/Mathematica solver lives in `reference/qsc/` as a read-only baseline. New optimized code targets JAX/Python with 50-100x speedup.
 
-Full specification: @QSC_SOLVER_IMPLEMENTATION_GUIDE.md
+Full specification: @discussion_AI.md
 
 ## Architecture
 
