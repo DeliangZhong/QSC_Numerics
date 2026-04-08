@@ -58,6 +58,8 @@ class SolverConfig:
     nPoints: int = 18     # Chebyshev grid size (typically cutP + 2)
     cutQai: int = 24      # Large-u expansion order for Q
     QaiShift: int = 60    # Imaginary pull-down cutoff
+    use_mpmath: bool = True   # Use mpmath for pulldown (enables large QaiShift)
+    mpmath_dps: int = 50      # mpmath decimal digits of precision
 
     @property
     def N0(self) -> int:
@@ -611,7 +613,9 @@ def _evaluate_Q_and_pulldown(b_all: list, BB: jnp.ndarray, Mt: jnp.ndarray,
                              sigma: jnp.ndarray,
                              uA: jnp.ndarray, g: complex,
                              NQ: int, NI: int, N0: int,
-                             lc: int) -> tuple:
+                             lc: int,
+                             use_mpmath: bool = False,
+                             mpmath_dps: int = 50) -> tuple:
     """Evaluate Q_{a|i}(u_k) at large u, then pull down to the cut.
 
     Returns (Qlower, Qtlower) each of shape (lc, 4).
@@ -689,41 +693,30 @@ def _evaluate_Q_and_pulldown(b_all: list, BB: jnp.ndarray, Mt: jnp.ndarray,
     Puj = Puj.transpose(1, 0, 2)  # (4_a, NI, lc)
 
     # Pull-down: iterate from n=NI-1 down to 0
-    # For each (k, i), and for each n:
-    #   Q_new[a] = P[a,n,k] * sum_b (-1)^{b+1} * P[3-b,n,k] * Q_old[b] + Q_old[a]
-    # This is: Q_new = outer(P, sum_b sign_b * P_rev_b * Q_old_b) + Q_old
-    # = P * (sign . P_rev) . Q_old + Q_old
-    # where the dot is over b.
-
     m1_signs = jnp.array([(-1.0) ** (b + 1) for b in range(4)])  # (4,)
 
-    # Vectorize over k (grid points): Q_upper has shape (4_a, 4_i, lc)
-    # For each pulldown step n (sequential):
-    #   contrib[i, k] = sum_b m1_signs[b] * Puj[3-b, n, k] * Q_upper[b, i, k]
-    #   Q_upper[a, i, k] += Puj[a, n, k] * contrib[i, k]
+    if use_mpmath:
+        # Mixed-precision pulldown via mpmath
+        import numpy as np
+        from qsc.pulldown_mp import pulldown_Q_mp
+        Q_np = np.array(Q_upper)
+        Puj_np = np.array(Puj)
+        Q_np = pulldown_Q_mp(Q_np, Puj_np, NI, dps=mpmath_dps)
+        Q_upper = jnp.array(Q_np)
+    else:
+        # Float64 JAX pulldown (fast but limited to NI ≈ 4)
+        Puj_rev = Puj[jnp.array([3, 2, 1, 0]), :, :]
 
-    # Puj_rev[b, n, k] = Puj[3-b, n, k]
-    Puj_rev = Puj[jnp.array([3, 2, 1, 0]), :, :]  # (4_b, NI, lc)
+        def pulldown_step(Q: jnp.ndarray, n: jnp.ndarray) -> tuple:
+            P_n = Puj[:, n, :]
+            P_rev_n = Puj_rev[:, n, :]
+            signed_P_rev = m1_signs[:, None] * P_rev_n
+            contrib = jnp.einsum('bk,bik->ik', signed_P_rev, Q)
+            Q_new = Q + P_n[:, None, :] * contrib[None, :, :]
+            return Q_new, None
 
-    def pulldown_step(Q: jnp.ndarray, n: jnp.ndarray) -> tuple:
-        """One pulldown step: n indexes into Puj."""
-        # Puj[:, n, :]: shape (4, lc) -- P values at this shift
-        P_n = Puj[:, n, :]  # (4_a, lc)
-        P_rev_n = Puj_rev[:, n, :]  # (4_b, lc)
-
-        # contrib[i, k] = sum_b m1_signs[b] * P_rev_n[b, k] * Q[b, i, k]
-        # = sum_b (m1_signs[b] * P_rev_n[b, k]) * Q[b, i, k]
-        signed_P_rev = m1_signs[:, None] * P_rev_n  # (4_b, lc)
-        # Q[b, i, k] * signed_P_rev[b, k] -> sum over b
-        contrib = jnp.einsum('bk,bik->ik', signed_P_rev, Q)  # (4_i, lc)
-
-        # Q_new[a, i, k] = Q[a, i, k] + P_n[a, k] * contrib[i, k]
-        Q_new = Q + P_n[:, None, :] * contrib[None, :, :]
-        return Q_new, None
-
-    # Iterate from n=NI-1 down to 0
-    n_range_pulldown = jnp.arange(NI - 1, -1, -1)
-    Q_upper, _ = jax.lax.scan(pulldown_step, Q_upper, n_range_pulldown)
+        n_range_pulldown = jnp.arange(NI - 1, -1, -1)
+        Q_upper, _ = jax.lax.scan(pulldown_step, Q_upper, n_range_pulldown)
 
     # P_a(u_k) on the cut
     x_cut_rescaled = x_of_u_long(uA / g, 1.0)  # (lc,)
@@ -1015,7 +1008,8 @@ def forward_map_typeI(params: jnp.ndarray, qn: QuantumNumbers,
 
     # Evaluate Q and pull down
     Qlower, Qtlower, Q_upper, P, Pt = _evaluate_Q_and_pulldown(
-        b_all, BB, Mt, Mhat, c, sigma, uA, g, NQ, NI, N0, lc
+        b_all, BB, Mt, Mhat, c, sigma, uA, g, NQ, NI, N0, lc,
+        use_mpmath=config.use_mpmath, mpmath_dps=config.mpmath_dps
     )
 
     # Gluing residual
