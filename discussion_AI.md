@@ -10,6 +10,54 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-6: Precision Bottleneck Misdiagnosed — Continuation Is the Real Problem (Apr 8, 2026)
+
+### Key Finding
+
+**The pulldown precision was NOT the bottleneck.** Testing the forward map at g=0.2 with C++ converged params shows:
+
+| QaiShift | Method | ||E|| | Time |
+|----------|--------|-------|------|
+| 4 | float64 | 2.55e-08 | 7.8s |
+| 4 | mpmath dps=50 | 2.58e-08 | 1.1s |
+| 30 | mpmath dps=50 | 4.25e-04 | 1.5s |
+| 60 | mpmath dps=80 | 1.79e-02 | 1.8s |
+
+**Float64 with QaiShift=4 gives the best residual at g=0.2!** Higher QaiShift gives WORSE results because the C++ solution was converged at QaiShift=60 with 186 digits — our float64 forward map with QaiShift=4 is solving a slightly different (but equally valid) truncated problem.
+
+The residual floor of ~10⁻⁸ across g=0.1 and g=0.2 is the float64 precision limit, NOT a pulldown precision issue. The solver can achieve 10-digit accuracy in Delta at both couplings.
+
+### The Actual Bottleneck: Continuation Step Size
+
+The continuation from g=0.1 to g=0.2 requires many tiny steps (dg ≈ 0.001-0.002) because:
+
+1. The physical coefficients change significantly with g (especially c[3] which scales as g^{-1})
+2. Linear extrapolation in physical space only predicts well for small dg
+3. The Newton basin of attraction at each g is narrow (~1% of the parameter range)
+
+The C++ handles this by starting at g=0.0001 with dg=0.0008 and doubling after 4 successes. Our scan reached g=0.15 in 9 minutes (24 points) — too slow for the full curve.
+
+### Revised Strategy
+
+The mpmath pulldown is implemented and works, but isn't needed for the precision issue. Instead, the priority is:
+
+1. **Faster continuation**: Either (a) start from perturbative data at weak coupling like C++ does, or (b) use the C++ solver to generate initial params at target g values, then let our JAX solver refine from there.
+
+2. **The practical path**: Use the C++ solver as a "data generator" for initial guesses. Extract converged solutions at g = 0.1, 0.2, 0.3, ..., 1.0 using the full C++ pipeline (wolframscript + TypeI_exec.out), then validate our JAX forward map against each.
+
+3. **For production use**: The ML initial guess (Task B) directly addresses the continuation bottleneck — a neural network predicting c(g) would provide initial guesses at ANY g instantly, bypassing sequential continuation entirely.
+
+### What mpmath IS Useful For
+
+The mpmath pulldown would be valuable for:
+- **High-precision results** (>15 digits) that float64 can't achieve
+- **Very strong coupling** (g > 5) where cutP needs to increase and the problem becomes larger
+- **Validation**: comparing float64 results against higher-precision baselines
+
+But for the immediate goal of reproducing Konishi Δ(g) to 10 digits across g ∈ [0, 1], **float64 with QaiShift=4 is sufficient** — the bottleneck is getting good initial guesses at each g.
+
+---
+
 ## Discussion-5: Phase 2 Plan — Mixed-Precision Pulldown then ML Acceleration (Apr 8, 2026)
 
 ### Phase 2 Instructions Received
