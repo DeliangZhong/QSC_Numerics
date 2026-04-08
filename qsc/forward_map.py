@@ -483,20 +483,9 @@ def _evaluate_Q_and_pulldown(b_all: list, BB: jnp.ndarray, Mt: jnp.ndarray,
                     new_val = Puj[a, n, k] * contrib + Q_old[a]
                     Q = Q.at[a, i, k].set(new_val)
 
-    # Evaluate P_a(u_k) and Ptilde_a(u_k) on the cut
-    x_cut = x_of_u_long(uA / g, g)  # x on the unit circle
-    P = jnp.zeros((4, lc), dtype=complex)
-    Pt = jnp.zeros((4, lc), dtype=complex)
-    for a in range(4):
-        for n in range(N0 + 1):
-            P = P.at[a, :].add(c[a][n] * x_cut ** (Mt[a] - 2 * n))  # error: should be x^Mt * x^{-2n}
-            Pt = Pt.at[a, :].add(c[a][n] * x_cut ** (-Mt[a] + 2 * n))  # tilde: x -> 1/x
-
-    # Actually, let me use the precomputed table approach from C++
-    # P_a(u_k) = sum_n c[a][n] * x_cut^{Mt[a]} * x_cut^{-2n}
-    #          = x_cut^{Mt[a]} * sum_n c[a][n] * x_cut^{-2n}
-    # Ptilde: same with x -> 1/x, so x_cut^{-Mt[a]} * sum_n c[a][n] * x_cut^{2n}
-    x_cut_rescaled = x_of_u_long(uA / g, 1.0)  # normalized
+    # P_a(u_k) = sum_n c[a][n] * x^{Mt[a]+2n}   (C++ convention: PaT = x^Mt * x^{2n})
+    # Ptilde:    sum_n c[a][n] * x^{-Mt[a]-2n}  (C++ convention: PtaT = x^{-Mt} * x^{-2n})
+    x_cut_rescaled = x_of_u_long(uA / g, 1.0)  # X(u/g) on the cut
     P = jnp.zeros((4, lc), dtype=complex)
     Pt = jnp.zeros((4, lc), dtype=complex)
     for a in range(4):
@@ -505,10 +494,10 @@ def _evaluate_Q_and_pulldown(b_all: list, BB: jnp.ndarray, Mt: jnp.ndarray,
         pt_sum = jnp.zeros(lc, dtype=complex)
         for n in range(N0 + 1):
             x2n = x_cut_rescaled ** (2 * n)
-            p_sum += c[a][n] / x2n
-            pt_sum += c[a][n] * x2n
-        P = P.at[a, :].set(xMt * p_sum)
-        Pt = Pt.at[a, :].set((1.0 / xMt) * pt_sum)
+            p_sum += c[a][n] * x2n       # x^{+2n}
+            pt_sum += c[a][n] / x2n      # x^{-2n}
+        P = P.at[a, :].set(xMt * p_sum)         # x^{Mt+2n}
+        Pt = Pt.at[a, :].set((1.0 / xMt) * pt_sum)  # x^{-Mt-2n}
 
     # Compute Qlower[k, i] = -sum_a (-1)^{a+1} * P[3-a, k] * Q[a, i, k]
     Qlower = jnp.zeros((lc, 4), dtype=complex)
@@ -663,12 +652,53 @@ def _fourier_inversion(deltaP: jnp.ndarray, deltaPt: jnp.ndarray,
     return E
 
 
+def params_to_V(params: jnp.ndarray, gauge_indices: list, N0: int) -> jnp.ndarray:
+    """Convert raw params (1+4*N0) to free variable vector V (dimV).
+
+    Removes gauge-fixed entries from the parameter vector.
+    """
+    # params = [Delta, c[0][1],...,c[0][N0], c[1][1],..., c[3][N0]]
+    # gauge_indices = [(a, n)] pairs where c[a][n] = 0
+    # The corresponding param index is 1 + a*N0 + (n-1) = a*N0 + n
+    skip_indices = set()
+    for a, n in gauge_indices:
+        skip_indices.add(a * N0 + n)  # index within the c-block, offset by 1 for Delta
+
+    V = []
+    V.append(params[0])  # Delta is always included
+    for idx in range(1, len(params)):
+        if (idx - 1) not in skip_indices:
+            V.append(params[idx])
+    return jnp.array(V)
+
+
+def V_to_params(V: jnp.ndarray, gauge_indices: list, N0: int) -> jnp.ndarray:
+    """Convert free variable vector V (dimV) back to raw params (1+4*N0).
+
+    Inserts zeros at gauge-fixed positions.
+    """
+    skip_indices = set()
+    for a, n in gauge_indices:
+        skip_indices.add(a * N0 + n)
+
+    params = [V[0]]  # Delta
+    v_idx = 1
+    for idx in range(4 * N0):
+        if idx in skip_indices:
+            params.append(0.0 + 0j)
+        else:
+            params.append(V[v_idx])
+            v_idx += 1
+    return jnp.array(params)
+
+
 def forward_map_typeI(params: jnp.ndarray, qn: QuantumNumbers,
                       g: float, config: SolverConfig) -> jnp.ndarray:
     """Complete forward map for TypeI states.
 
     params: flat array [Delta, c[0,1],...,c[0,N0], c[1,1],...,c[3,N0]]
             where c[a][n] are in the INTERNAL (denormalized) convention.
+            Length = 1 + 4*N0 (includes gauge-fixed entries as zeros).
     qn: quantum numbers
     g: coupling constant
     config: solver hyperparameters

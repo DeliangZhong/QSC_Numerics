@@ -3,8 +3,13 @@
 import jax
 import jax.numpy as jnp
 
-from qsc.forward_map import SolverConfig, forward_map_typeI
-from qsc.quantum_numbers import QuantumNumbers
+from qsc.forward_map import (
+    SolverConfig,
+    V_to_params,
+    forward_map_typeI,
+    params_to_V,
+)
+from qsc.quantum_numbers import QuantumNumbers, compute_gauge_info, compute_Mtint
 
 
 def solve_newton(params0: jnp.ndarray, qn: QuantumNumbers, g: float,
@@ -12,36 +17,55 @@ def solve_newton(params0: jnp.ndarray, qn: QuantumNumbers, g: float,
                  max_iter: int = 30) -> dict:
     """Newton solver using JAX AD for the Jacobian.
 
+    params0: initial guess in raw format [Delta, c[0][1],...,c[3][N0]]
+             (1 + 4*N0 elements, including gauge-fixed entries)
+
     Returns dict with:
-    - params: converged parameter vector
-    - residual_norm: final ||F||
+    - params: converged parameter vector (raw format)
+    - residual_norm: final ||F||_inf
     - iterations: number of iterations used
     - converged: bool
+    - delta_history: list of Delta values
     """
-    F = lambda p: forward_map_typeI(p, qn, g, config)
-    J_fn = jax.jacfwd(F)
+    N0 = config.N0
+    Mtint = compute_Mtint(qn)
+    gauge_info = compute_gauge_info(Mtint, N0)
+    gauge_indices = gauge_info["gauge_indices"]
 
-    params = params0.copy()
+    # Convert to free variables
+    V0 = params_to_V(params0, gauge_indices, N0)
+
+    # Forward map in V-space
+    def F_V(V):
+        p = V_to_params(V, gauge_indices, N0)
+        return forward_map_typeI(p, qn, g, config)
+
+    V = V0.copy()
+    delta_history = []
     for i in range(max_iter):
-        residual = F(params)
-        norm = jnp.max(jnp.abs(residual))
+        residual = F_V(V)
+        norm = float(jnp.max(jnp.abs(residual)))
+        delta_history.append(float(jnp.real(V[0])))
         if norm < tol:
+            params = V_to_params(V, gauge_indices, N0)
             return {
                 "params": params,
-                "residual_norm": float(norm),
+                "residual_norm": norm,
                 "iterations": i,
                 "converged": True,
+                "delta_history": delta_history,
             }
-        jacobian = J_fn(params)
-        # Take real parts for the linear solve if needed
+        jacobian = jax.jacfwd(F_V, holomorphic=True)(V)
         delta = jnp.linalg.solve(jacobian, -residual)
-        params = params + delta
+        V = V + delta
 
-    residual = F(params)
-    norm = jnp.max(jnp.abs(residual))
+    residual = F_V(V)
+    norm = float(jnp.max(jnp.abs(residual)))
+    params = V_to_params(V, gauge_indices, N0)
     return {
         "params": params,
-        "residual_norm": float(norm),
+        "residual_norm": norm,
         "iterations": max_iter,
-        "converged": float(norm) < tol,
+        "converged": norm < tol,
+        "delta_history": delta_history,
     }
