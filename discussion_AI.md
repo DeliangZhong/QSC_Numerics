@@ -10,6 +10,195 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-2: Implementation Plan — TypeI Forward Map First (Apr 8, 2026)
+
+### Strategy
+
+After studying the C++ core (`TypeI_core.cpp`, 3200 lines) and the Mathematica orchestration pipeline in detail, the critical insight is: **the forward map is the hard part**. Newton/Broyden/continuation are standard numerical methods; the physics lives entirely in the forward map `(c, Δ, g) → F`. Once that's correct and JAX-traceable, everything else follows.
+
+**Approach: TypeI Konishi first, validate obsessively, then generalize.**
+
+TypeI (LR + parity symmetric) is the simplest case — only even powers in the P-expansion, `c_{a,n} = c̃_{a,n}`, and dimV ≈ 1 + 4×(cutP/2) after gauge fixing. The Konishi operator (Δ₀=2, `[0,0,1,1,1,1,0,0]`) is the canonical test case with abundant published data.
+
+### Milestone 0: Validation Data Extraction
+
+**Goal:** Extract intermediate values from the Konishi Mathematica prototype at a specific g (e.g., g = 0.1) so every module can be unit-tested against ground truth — not just final (g, Δ) pairs.
+
+Run `prototype/Konishi_prototype.nb` via wolframscript and export at each algorithm stage:
+- Quantum numbers and derived quantities: L, Λ[a], ν[i], Mt[a], M̂[i], A_a, B_i, AA, BB, α[a][i]
+- Chebyshev grid: u_k points, CT/CU matrices, suA weights
+- σ-coefficients (kappa/kappabar tables)
+- P_a(u_k) on the grid (both sheets)
+- ksub[a][n] (1/u expansion of P_a)
+- q-array (convolution products)
+- b_{a|i,n} coefficients for each i (the sequential 4×4 solves)
+- Q_{a|i}(u_k) before and after pull-down
+- Q_lower, Q̃_lower at the cut
+- α_Q gluing constant
+- δP residual at the cut
+- E (equation vector after Fourier inversion)
+
+Save as JSON/npz for pytest fixtures. This is the single most important step — without intermediate ground truth, debugging the forward map is guesswork.
+
+### Milestone 1: Core Mathematics Modules (TypeI only)
+
+All modules written in JAX from the start (pure functional, no mutation). Each module has pytest tests against Milestone 0 data.
+
+**1.1 `qsc/quantum_numbers.py`**
+
+Dataclass `QuantumNumbers` holding nb, nf, na, sol. Derive:
+```
+L = (Σnf + Σna - Σnb) / 2
+Δ₀ = Σnf/2 + Σna
+Λ = (1 - Λ₀[1] - Λ₀[4]) / 2
+Λ[a] = nf[a] + {2,1,0,-1}[a] + Λ
+ν[i] = {-L-nb₁-1, -L-nb₂-2, na₁+1, na₂}[i] + (Δ-Δ₀)/2·{-1,-1,1,1}[i] - Λ
+Mt[a] = -Λ[a]   (powP in Mathematica)
+M̂[i] = -ν[i] - 1   (powQ in Mathematica)
+```
+Plus A_a, B_i, AA[a][b], BB[a][i] matrices, and α[a][i] = M̂[i] - Mt[a].
+
+Determine gauge-fixed indices (where `2n = Mtint[0] - Mtint[a]`), and CtoV/VtoC mappings.
+
+**1.2 `qsc/zhukovsky.py`**
+
+Core functions:
+- `x_of_u(u, g)`: Zhukovsky variable. Use the **long-cut** convention from C++: `x = u/2 - i/2 · √(4-u²)` (note: C++ uses `u` rescaled by `1/(2g)` in places — must be careful with conventions).
+- `x_of_u_short(u, g)`: short-cut version for `|u| > 2g`.
+- `sigma_coefficients(twiceMt, N_trunc, NQ, g)`: the kappa/kappabar recursion. This encodes the 1/u expansion of `X(u)^{Mt[a]}` via:
+  ```
+  σ(twiceMt, n, r, g) = Σ_{s=0}^{k-r} kappabar(twiceMt, s) · kappa(2r+q₀, k-r-s)  ×  (√g)^{twiceMt+2n}
+  ```
+  where `k = n÷2`, `q₀ = n mod 2`.
+
+**1.3 `qsc/chebyshev.py`**
+
+- `chebyshev_grid(g, lc)`: Chebyshev-Gauss points on `[-2|g|, 2|g|]`.
+- `chebyshev_matrices(lc)`: CT (cosine) and CU (Chebyshev-U) transform matrices.
+- `sqrt_weight(g, u_k)`: `√(4g² - u_k²)` weights.
+
+**1.4 `qsc/p_functions.py`**
+
+- `evaluate_P(c, Mt, u_grid, g, sigma)`: P_a(u_k) from coefficients + sigma tables.
+  Also computes P̃_a (tilde = second sheet, x→1/x).
+- `ksub_coefficients(c, sigma, NQ)`: 1/u expansion coefficients of P_a.
+- `evaluate_P_shifted(c, Mt, u_grid, g, n_shifts, sigma)`: P_a(u_k + i·n) for n = 0,...,NI-1 (needed for pull-down).
+
+**1.5 `qsc/qq_relations.py`** — THE HARD MODULE
+
+This translates `QconstructorUJ2LRi` from C++. Three stages:
+
+*Stage A: q-array (convolution products)*
+```
+q[(n,a,b)] = Σ_{m=0}^{n} ksub[a][m] · (-1)^{b+1} · ksub[3-b][n-m]  /  AA[a][b]
+```
+
+*Stage B: b-coefficients via sequential 4×4 linear solves*
+For each i=0,...,3 and m=1,...,NQ[i]:
+```
+scT[m] · b[i][m] = F1(m) - F2(m)
+```
+where:
+- `scT[m][a][b] = AA[a][b]·B[b][i] - i·B[a][i]·(2m - α[a][i])·δ_{ab}` (from `totalscTmaker2LRi`)
+- F1 depends on: BB, α[a][i], previous b's, T1/T2/T3/T41/T5 tables (binomial expansions of α)
+- F2 depends on: AA, BB, previous b's, q-array, S1n/S1/S31/S32 tables
+
+This is sequential (each m depends on all previous m's) → implement as `jax.lax.scan` over m.
+
+*Stage C: Q evaluation + pull-down*
+1. Evaluate Q_{a|i} at large u: `Q[a][i][k] = BB[a][i] · u_k^{-M̂_i-NI} · Σ_n b[i][n,a] · u_k^{-n}`
+2. Pull down through NI imaginary steps:
+   ```
+   for n = NI-1 down to 0:
+     Q_new[a][i][k] = Σ_{b} (-1)^{b+1} · P[3-b](u_k+in) · Q_old[b][i][k] · P[a](u_k+in) + Q_old[a][i][k]
+   ```
+   This is also sequential → `jax.lax.scan` (or `fori_loop`) over n.
+
+**1.6 `qsc/gluing.py`**
+
+From Q_{a|i}(u_k), compute:
+1. `Q_lower[k,i] = -Σ_a (-1)^{a+1} · P[3-a](u_k) · Q[a][i][k]` (contract upper indices)
+2. Similarly `Q̃_lower` using P̃ instead of P
+3. `α_Q = Re(mean(Q₀/Q₂* + Q̃₀/Q̃₂* - Q₁/Q₃* - Q̃₁/Q̃₃*)) / 4`
+4. Residual: `δP[k,a] = Q[a,0,k]·(Q₃+Q₁*/αQ) - Q[a,1,k]·(Q₂-Q₀*/αQ) + Q[a,2,k]·(Q₁+Q₃*·αQ) - Q[a,3,k]·(Q₀-Q₂*·αQ)`
+
+**1.7 `qsc/fourier.py`**
+
+Transform δP(u_k) back to coefficient residuals:
+- `QtoE_typeI(deltaP, deltaPt, CT, CU, suA, ...)`: splits into symmetric/antisymmetric modes, applies Chebyshev inversion, produces residual vector E of dimension dimV.
+
+**1.8 `qsc/forward_map.py`**
+
+Chain: params → quantum_numbers → P-functions → Q-propagation → gluing → Fourier → residual.
+
+```python
+def forward_map(params: jnp.ndarray, qn: QuantumNumbers, g: float, config: SolverConfig) -> jnp.ndarray:
+    """Pure functional: (Δ, c_{a,n}) → residual F. JAX-traceable."""
+```
+
+**Integration test:** `||forward_map(known_Konishi_solution, g=0.1)|| < 10⁻¹⁰`
+
+### Milestone 2: Newton Solver with AD
+
+**2.1 `qsc/newton.py`**
+
+```python
+def solve(params0, qn, g, config, tol=1e-12, max_iter=30):
+    F = lambda p: forward_map(p, qn, g, config)
+    J = jax.jacfwd(F)
+    # standard Newton loop
+```
+
+**2.2 Validation:**
+- Solve Konishi at g=0.1 starting from perturbative data → check Δ matches reference
+- Verify AD Jacobian vs finite-difference Jacobian to ~10⁻⁷
+- Solve Konishi at g=0.5 starting from g=0.1 solution → check Δ ≈ 3.713
+
+### Milestone 3: Continuation + Optimization
+
+**3.1 `qsc/broyden.py`** — Sherman-Morrison rank-1 update of J⁻¹. Benchmark iteration count vs Newton.
+
+**3.2 `qsc/continuation.py`** — Predictor-corrector in g:
+- Predictor: `c(g+δg) ≈ c(g) + δg · (-J⁻¹ ∂F/∂g)` (∂F/∂g via AD, essentially free)
+- Corrector: Newton/Broyden from predicted guess
+- Adaptive δg: double if ≤3 iterations, halve if >8
+
+**3.3 `qsc/adaptive_truncation.py`** — Multigrid in N_trunc: solve at N=4, pad to N=8, re-solve, etc.
+
+**Validation:** Reproduce full Konishi Δ(g) curve for g ∈ [0, 5] and compare against 254-point reference data.
+
+### Milestone 4: Generalization to TypeII–IV
+
+**4.1 `qsc/symmetry.py`** — Detect operator type from quantum numbers. Handle:
+- TypeII: LR symmetric but general parity → different CtoV mapping, zero-mode complications
+- TypeIII: Parity symmetric but no LR → separate c and c̃ parameters
+- TypeIV: General → full 8·N_trunc + 1 parameter space
+
+**4.2 GPU batching** — `jax.vmap(solve_single_state)` over the 219 states.
+
+### Milestone 5: High-Precision Mode
+
+`qsc/precision.py` — float64 for early Newton iterations, switch to mpmath for final 2–3 iterations when >15 digits needed.
+
+### Risk Assessment
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Convention mismatch (signs, normalizations, index ordering) | Fatal — wrong results | Milestone 0: extract ALL intermediate values from Mathematica |
+| b-coefficient recursion has subtle dependencies | Hard to debug | Test each m-step against Mathematica b_{a\|i,m} values |
+| JAX tracing breaks on sequential Q-propagation | Blocks AD | Use `jax.lax.scan`/`fori_loop`; fall back to `jax.checkpoint` if memory issues |
+| Pull-down numerically unstable at strong coupling | Wrong Q at cut | Start with weak coupling (g < 1); match C++ NI strategy |
+| Performance regression vs C++ at float64 | Defeats purpose | Profile after correctness; JIT compilation should help |
+
+### Decisions (resolved Apr 8)
+
+1. **Milestone 0 scope**: Full set — extract ALL intermediate quantities (quantum numbers, sigma tables, P values, ksub, q-array, b-coefficients, Q values before/after pulldown, gluing constant, residual, equation vector). Safest approach.
+2. **Starting coupling**: g = 0.1 (weak coupling, perturbative data available, fast convergence).
+3. **Module granularity**: `qq_relations.py` is one function (~250 lines of C++ → comparable in Python). Keep it monolithic to match the C++ structure.
+4. **TypeII–IV timeline**: Defer until Konishi works end-to-end (Milestone 2 complete).
+
+---
+
 ## Discussion-1: Accelerated QSC Solver — Implementation Guide (Apr 8, 2026)
 
 ### Goal
