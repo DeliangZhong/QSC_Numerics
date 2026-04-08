@@ -157,28 +157,27 @@ def _compute_q_array(ksub: list, AA: jnp.ndarray, NQ: int) -> jnp.ndarray:
     return q
 
 
-def _build_scT_matrices(AA: jnp.ndarray, B: jnp.ndarray, alfa: jnp.ndarray,
+def _build_scT_matrices(AA: jnp.ndarray, BB: jnp.ndarray, alfa: jnp.ndarray,
                         NQ: int) -> list:
     """Build scT[i][m] matrices (4x4) for each i=0..3, m=0..NQ.
 
-    scT[m][a][b] = AA[a][b]*B[b][i]  for a != b
-    scT[m][a][a] = AA[a][a]*B[a][i] - i*B[a][i]*(2m - alfa[a][i])  for a == b
-    scT[0] = 0 (identity for m=0).
+    From totalscTmaker2LRi in C++ (note: the C++ 'B' parameter is actually BB):
+    scT[m][a][b0] = AA[a][b0]*BB[b0][i]  for a != b0
+    scT[m][a][a]  = AA[a][a]*BB[a][i] - i*BB[a][i]*(2m - alfa[a][i])
+    scT[0] = 0.
     """
     II = 1j
     scT_all = []
     for i in range(4):
         scT_i = jnp.zeros((NQ + 1, 4, 4), dtype=complex)
         for m in range(1, NQ + 1):
-            mat = AA * B[None, :, i] if B.ndim == 2 else jnp.zeros((4, 4), dtype=complex)
-            # Build the matrix element by element
             for a in range(4):
-                for b in range(4):
-                    if a == b:
-                        val = AA[a, b] * B[b] - II * B[a] * (2 * m - alfa[a, i])
+                for b0 in range(4):
+                    if a == b0:
+                        val = AA[a, b0] * BB[b0, i] - II * BB[a, i] * (2 * m - alfa[a, i])
                     else:
-                        val = AA[a, b] * B[b]
-                    scT_i = scT_i.at[m, a, b].set(val)
+                        val = AA[a, b0] * BB[b0, i]
+                    scT_i = scT_i.at[m, a, b0].set(val)
         scT_all.append(scT_i)
     return scT_all
 
@@ -725,7 +724,7 @@ def forward_map_typeI(params: jnp.ndarray, qn: QuantumNumbers,
     q = _compute_q_array(ksub, AA, NQ)
 
     # scT matrices
-    scT = _build_scT_matrices(AA, B, alfa, NQ)
+    scT = _build_scT_matrices(AA, BB, alfa, NQ)
 
     # Auxiliary tables
     aux_tables = _build_auxiliary_tables(alfa, NQ)
