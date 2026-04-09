@@ -10,6 +10,59 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-10: Basin of Attraction Diagnostics (Apr 9, 2026)
+
+### What Was Tested
+
+`scripts/test_basin.py`: perturb C++ converged solution by multiplicative factor, run Newton, measure convergence. Also tested line search alphas and AD vs FD Jacobian comparison.
+
+### Results — g=0.1
+
+| Perturbation | Initial ||E|| | After 1 step (α=1) | Converged? | Iterations | Delta error |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1% | 8.3 | 0.15 | **YES** | 8 | 4e-10 |
+| 3% | 24 | 1.4 | **YES** | 8 | 3e-9 |
+| 10% | 73 | 12 | stalled | 20 | 2e-8 |
+
+Full Newton step (α=1) is optimal at all perturbation levels at g=0.1. Convergence rate: quadratic for first 5 iterations, then stalls at ~10⁻⁶ (float64 floor).
+
+### Results — g=0.2
+
+| Perturbation | Initial ||E|| | After 1 step (α=1) | Converged? | Delta error |
+|:---:|:---:|:---:|:---:|:---:|
+| 0.1% (Delta only) | 1.05 | 0.004 | **stalls at 1.1e-3** | 6e-5 |
+| 1% (all params) | 7.3 | **20.5** (overshoots!) | FAIL → wrong root | 0.25 |
+| 3% (all params) | 21 | 1.3 | FAIL → wrong root | 0.11 |
+
+**Critical findings:**
+1. At g=0.2, full Newton step **OVERSHOOTS** from 1% perturbation (||E|| increases from 7.3 to 20.5)
+2. Even with line search (α=0.5 gives 0.76 at 1% pert), Newton converges to **WRONG ROOT** (Delta=2.126 vs reference 2.419)
+3. With Delta-only 0.001 perturbation and line search, Newton stalls at ||E||=1.1e-3 — cannot reach the 2.6e-8 floor at the exact solution
+
+### Jacobian Analysis
+
+| g | cond(J) | min SV | max SV | AD-FD agreement |
+|:---:|:---:|:---:|:---:|:---:|
+| 0.1 | 8.4e5 | 4.6e-3 | 3830 | 1.4e-4 |
+| 0.2 | 6.7e5 | 1.6e-3 | 1070 | 1.9e-4 |
+
+Both have rank 32 (full). The smallest SV corresponds to the gauge direction. Condition numbers are comparable but the basin behavior is dramatically different.
+
+### Diagnosis
+
+The Newton solver converges well at g=0.1 (basin radius ~3%) but fails at g=0.2 (basin radius < 0.1%). The issue is NOT the Jacobian conditioning (both ~10⁵) or AD accuracy (AD-FD agree to 10⁻⁴). The issue is:
+
+1. **Multiple roots**: the forward map has spurious solutions, and at g=0.2 the basins are interleaved. Even small perturbations can push Newton into a wrong basin.
+2. **Newton direction quality**: the 1.1e-3 stalling residual suggests the Newton step has a component along a near-flat direction that doesn't reduce the residual.
+
+### Next Steps
+
+1. Try a **two-phase Newton**: first solve for Delta alone (1D Newton), then solve the full system with Delta fixed. This matches how the physics works — Delta is the "eigenvalue" and c are the "eigenvector."
+2. Try **smaller continuation steps** (dg=0.001) with the damped Newton — this is what C++ effectively does.
+3. Extract perturbative initial guesses from Mathematica for weak-coupling starting point.
+
+---
+
 ## Discussion-9: Convergence Fix Instructions — Newton Must Work Before ML (Apr 8, 2026)
 
 ### Problem Statement
