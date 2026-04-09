@@ -173,13 +173,16 @@ class FullParamPredictor:
             gs = np.array([self.solved_g[i] for i in indices])
             phys_arr = np.array([self.solved_phys[i] for i in indices])
 
-            # Polynomial interpolation for each parameter
+            # Linear interpolation from nearest 2-3 points (stable)
             phys = np.zeros(1 + 4 * N0)
             phys[0] = Delta - 2  # anomalous dimension
-            deg = min(n_use - 1, 3)
+            deg = min(n_use - 1, 2)  # at most quadratic
             for j in range(1, 1 + 4 * N0):
-                coeffs = np.polyfit(gs, phys_arr[:, j], deg)
-                phys[j] = np.polyval(coeffs, g)
+                if n_use == 1:
+                    phys[j] = phys_arr[0, j]
+                else:
+                    coeffs = np.polyfit(gs, phys_arr[:, j], deg)
+                    phys[j] = np.polyval(coeffs, g)
         else:
             # Fall back to perturbative c-coefficients
             from qsc.perturbative import perturbative_params
