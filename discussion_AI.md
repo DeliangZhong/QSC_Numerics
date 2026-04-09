@@ -10,6 +10,33 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-9: Convergence Fix Instructions — Newton Must Work Before ML (Apr 8, 2026)
+
+### Problem Statement
+
+The JAX solver **cannot autonomously converge** beyond g ≈ 0.15. The C++ solver converges across g ∈ [0, 13]. Both use pure undamped Newton (confirmed by reading TypeI_core.cpp lines 2800-2996). The C++ converges because it has 186-digit precision + tiny continuation steps (dg=0.0008 from g=0.0001). At float64, we need damped Newton + better continuation.
+
+### C++ Newton Analysis (from TypeI_core.cpp)
+
+- **Pure undamped Newton**: `V_new = V_old - dc` (full step, no alpha)
+- **No line search, no trust region, no damping**
+- **Convergence criterion**: BOTH `||E||² < 10^{-precssf}` AND `|δΔ| < 10^{-precDelta}`
+- **Direct LU solve** of J·δ = -F (not normal equations)
+- **PhiV-directed FD Jacobian**: each variable perturbed in its natural direction (real or imaginary)
+- **Gauge re-application** after each step via VtoC2LR
+- **c[a][0] recomputed** from A[a]/g^Mt[a] at each iteration
+
+### Execution Plan
+
+**Step 1: Diagnostics** — measure basin of attraction at g=0.1 and g=0.2 with perturbed C++ solutions  
+**Step 2: Damped Newton** — add backtracking line search + Levenberg-Marquardt fallback  
+**Step 3: Perturbative initial guess** — extract sbWeak data for Konishi to Python  
+**Step 4: Weak-coupling continuation** — start at g=0.0001, match C++ adaptive strategy  
+**Step 5: Full Konishi curve** — g ∈ [0.0001, 5.0], validate against 254 reference points  
+**Step 6: ML initial guesses** — only after solver converges autonomously  
+
+---
+
 ## Discussion-8: Phase 1 Summary and Decision Point (Apr 8, 2026)
 
 ### What Was Built
