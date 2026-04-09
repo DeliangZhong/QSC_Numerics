@@ -10,6 +10,22 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-13: Dense JAX Scan + ML Predictor (Apr 9, 2026)
+
+### Dense Scan Results
+
+30 points from g=0.05→0.171 in ~35 min. Accuracy: 2.6 digits at g=0.1, 2.8 at g=0.15. Stuck at g≈0.18 (Newton basin too narrow).
+
+### ML Predictor
+
+MLP (128×128) trained on 295 points. Newton from ML guess converges at g=0.05, 0.12, and **g=0.15 (Delta=2.24885219 matches reference to 6 digits)**. Fails at g=0.10 and g=0.20 (wrong basin).
+
+### Key Insight
+
+ML works where predicted c-coefficients land in the right basin. More training data at g>0.17 needed — bootstrap from dense scan data.
+
+---
+
 ## Implementation-12: C++ Solver Speed & Convergence Measurement (Apr 9, 2026)
 
 ### What Was Tested
