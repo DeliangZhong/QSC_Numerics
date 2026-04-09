@@ -10,6 +10,32 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-14: ML Failures Analysis + Fix Strategy (Apr 9, 2026)
+
+### Why ML Initial Guess Fails
+
+**Root cause: L2 loss ≠ basin membership.** The MLP minimises `Σ(c_pred - c_true)²`, but Newton convergence requires ALL 32 parameters to be within the basin of attraction — a geometrically complex, non-convex region. At g=0.2, the basin radius is <0.1%. With 32 parameters, even 1% per-param error gives ~38% chance of being inside. The ML has no mechanism to be more accurate where basins are narrow.
+
+**Why g=0.10 fails despite nearby training data:** The dense scan solutions at g≈0.10 have only 2.6-digit accuracy (error accumulated during continuation). ML trained on noisy data produces noisy predictions that fall outside the 3% basin.
+
+### Fix Strategy (ordered by impact)
+
+**1. Unstick dense scan first (Priority 1).** The scan stalls at g≈0.18. Diagnose: try dg=0.0005, use 4-point polynomial interpolation (matching C++ `InterpolateIn`) instead of linear extrapolation. If it reaches g=0.5, ML becomes trivial.
+
+**2. Convergence-aware ML loss (Priority 2).** Replace MSE with forward-map residual:
+```python
+loss = jnp.sum(forward_map(c_pred, qn, g, config)**2)
+```
+This is differentiable through the JAX forward map. Directly optimises for "prediction satisfies the physics."
+
+**3. Gradient descent warmup before Newton (Priority 3).** The basin of gradient descent on `||F||²` is MUCH wider than Newton's. Run ~50 GD steps to get within Newton's basin, then switch to Newton for fast quadratic convergence.
+
+**4. Multi-shooting for parallelism (Priority 4).** Split g∈[0,5] into intervals, seed each with ML guess, run dense continuation within each interval in parallel. ML only needs ~5% accuracy (to be within 0.05 in g of a reachable point), not 0.1%.
+
+**5. RL for step control: NOT recommended.** The optimal policy is simple (double/halve heuristic), RL training is prohibitively expensive, and the real bottleneck is sequential dependency not step-size choice.
+
+---
+
 ## Implementation-13: Dense JAX Scan + ML Predictor (Apr 9, 2026)
 
 ### Dense Scan Results

@@ -93,18 +93,22 @@ def main():
     while g < 1.0:
         g_new = round(g + dg, 6)
 
-        # Linear extrapolation in physical space
-        if phys_prev is not None:
-            slope = (phys - phys_prev) / (solved_g[-1] - solved_g[-2])
-            pred = phys + slope * (g_new - solved_g[-1])
-        else:
-            pred = phys.copy()
+        # 4-point polynomial interpolation in physical space (matches C++ InterpolateIn)
+        n_interp = min(4, len(solved_g))
+        gs_interp = np.array(solved_g[-n_interp:])
+        phys_interp = np.array(solved_phys[-n_interp:])
+        deg = min(n_interp - 1, 3)
+
+        pred = np.zeros(1 + 4 * N0)
+        for j in range(1 + 4 * N0):
+            coeffs = np.polyfit(gs_interp, phys_interp[:, j], deg)
+            pred[j] = np.polyval(coeffs, g_new)
 
         params_pred = p2i(pred, g_new)
         res = solve_newton(params_pred, KONISHI, g_new, config,
-                          tol=1e-10, max_iter=12, damped=True)
+                          tol=1e-10, max_iter=8, damped=True)
 
-        if res["converged"] or res["residual_norm"] < 1e-4:
+        if res["converged"] or res["residual_norm"] < 5e-4:
             phys_prev = phys.copy()
             phys = i2p(res["params"], g_new)
             g = g_new
@@ -134,8 +138,8 @@ def main():
         else:
             dg /= 2
             success_count = 0
-            if dg < 1e-4:
-                print(f"STUCK at g={g_new:.4f}, dg<1e-4", flush=True)
+            if dg < 1e-5:
+                print(f"STUCK at g={g_new:.4f}, dg<1e-5", flush=True)
                 break
 
         # Save frequently (every 10 points) for crash resilience
