@@ -10,6 +10,43 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-11: Perturbative Guess + Weak-Coupling Continuation (Apr 9, 2026)
+
+### What Was Done
+
+1. Extracted Konishi perturbative coefficients (sbWeak) from Mathematica: 6 delta terms (g² to g¹²) + 39 c-coefficient terms
+2. Implemented `qsc/perturbative.py`: evaluates the expansion at any g, returns internal-format params
+3. Tested continuation starting from perturbative guess at g=0.05
+
+### Results
+
+| g start | Perturbative ||E|| | Newton converges? | Continuation reach |
+|:---:|:---:|:---:|:---:|
+| 0.01 | 1.8e-4 | stalls at 5e-5 | — |
+| 0.02 | 7.5e-6 | YES | g=0.02 only |
+| 0.05 | 3.0e-5 | YES (4 iter) | g=0.069 (12 pts in 8 min) |
+| 0.10 | 2.2e-3 | YES at g=0.1 directly | g=0.15 (from before) |
+
+### Assessment
+
+The continuation works but is **fundamentally slow** due to the narrow Newton basin at moderate coupling. The basin at g=0.2 is <0.1% — even a 0.001 perturbation of Delta alone causes Newton to stall at ||E||=1e-3.
+
+The rate of ~0.002 in g per minute means:
+- g=0.1 in ~25 min (from g=0.05)
+- g=0.5 in ~4 hours
+- g=1.0 in ~8 hours
+- g=5.0 in ~40 hours
+
+This is impractical for iterative development but could work as a one-time data generation run.
+
+### Root Cause
+
+The narrow basin is caused by the **g-dependent denormalization** c_internal = c_phys / g^Mt[a]. With Mt ranging from -1 to +2, a small change in g causes large changes in the internal representation. The forward map sees these as large perturbations even when the physical solution changes smoothly.
+
+A potential fix: **reformulate the forward map in the physical convention** (where coefficients are smooth in g) rather than the C++ internal convention. This would make the Jacobian better conditioned for continuation. But it requires rewriting the forward map — a significant refactoring effort.
+
+---
+
 ## Implementation-10: Basin of Attraction Diagnostics (Apr 9, 2026)
 
 ### What Was Tested
