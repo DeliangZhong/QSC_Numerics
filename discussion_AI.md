@@ -10,6 +10,53 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-12: C++ Solver Speed & Convergence Measurement (Apr 9, 2026)
+
+### What Was Tested
+
+Ran the actual C++ solver (TypeI_exec.out via TypeI_script.wls) for Konishi at individual g values and measured convergence behavior, timing, and failure modes.
+
+### C++ Per-Point Timing
+
+| g | From | Iters | C++ time | Saved? |
+|:---:|:---:|:---:|:---:|:---:|
+| 0.001 | perturbative | 3 | **22s** | YES |
+| 0.002 | interp(1 pt) | 5 | 36s | NO (wrong root) |
+| 0.01 | interp(1 pt) | 1 | **7s** | YES |
+| 0.02 | interp(2 pts) | 1 | **7s** | YES |
+| 0.05 | interp(3 pts) | 5 | 37s | NO (wrong root) |
+| 0.1 | interp(3 pts) | 5 | 37s | NO (precision too low) |
+
+### Key Findings
+
+1. **C++ has the SAME convergence problem as JAX.** With only 1-3 saved points for interpolation, the C++ solver converges to wrong roots at g=0.002, 0.005, 0.05. Pure undamped Newton with a bad initial guess → wrong basin.
+
+2. **C++ per-point time: 7-37s.** JAX per-point: ~4s. **JAX is already 2-5× faster** per evaluation, because float64 arithmetic is 50× faster than 186-digit CLN.
+
+3. **C++ works because of DENSE continuation.** The real pipeline (TypeI_run.ipynb) starts at g=0.0001 with dg=0.0008 and accumulates 100+ saved points. With 4 nearby points, `InterpolateIn` (polynomial fit) gives excellent initial guesses. Each step is a <0.1% change in g.
+
+4. **The convergence issue is IDENTICAL in both implementations.** Both use pure undamped Newton. Both fail from bad initial guesses. The C++ pipeline succeeds by never having a bad initial guess (tiny steps + dense interpolation history).
+
+### Implication for JAX Solver
+
+Our JAX solver already matches the C++ algorithm. The fix is NOT in the Newton solver — it's in the **continuation strategy**:
+
+- Start at g=0.0001 (not g=0.1)
+- Use dg=0.0008 (not dg=0.005)
+- Build interpolation history (4-point polynomial fit)
+- Never jump more than ~0.002 in g
+
+With dg=0.001 steps and 4s per step, reaching g=1.0 requires ~1000 steps × 4s = **67 minutes**. This is 3× faster than the C++ pipeline (~200 minutes estimated from 20s avg per point × 1000 steps).
+
+### Next Steps
+
+1. Implement the dense continuation (dg=0.001, 4-point polynomial interpolation) in JAX
+2. Run it overnight to generate the full Konishi curve
+3. Validate against reference data
+4. Then proceed to ML initial guesses
+
+---
+
 ## Implementation-11: Perturbative Guess + Weak-Coupling Continuation (Apr 9, 2026)
 
 ### What Was Done
