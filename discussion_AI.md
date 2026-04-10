@@ -10,6 +10,297 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-17: Diagnostic — Hybrid Precision Fails, Root Cause Identified (Apr 9, 2026)
+
+### Hybrid Precision Does NOT Work
+
+Tested the hybrid approach (mpmath F + float64 AD J with different QaiShift). Results at g=0.1 with the C++ exact solution:
+
+| QaiShift | dps | cutQai | ||E|| | Time |
+|:---:|:---:|:---:|:---:|:---:|
+| 4 | f64 | 24 | **8.96e-08** | 6.1s |
+| 4 | 50 | 24 | 8.83e-08 | 0.8s |
+| 6 | 50 | 24 | 2.81e-07 | 1.1s |
+| 10 | 50 | 24 | 3.81e-06 | 1.2s |
+| 20 | 100 | 24 | 6.97e-05 | 1.2s |
+| 50 | 200 | 30 | 1.28e-02 | 0.9s |
+
+**Residual GROWS monotonically with QaiShift**, regardless of dps. More pulldown steps amplify the b-coefficient truncation error. The QaiShift=4 and QaiShift=50 forward maps compute DIFFERENT systems — not the same system at different precision.
+
+Increasing cutQai doesn't help either: at a given QaiShift, cutQai=30/40/50 give identical residuals.
+
+**Consequence:** The Jacobian from config_f64 (QaiShift=4) points in the wrong direction for the config_mp (QaiShift=50) residual → Newton DIVERGES with hybrid setup.
+
+### Actual Root Cause: Error Accumulation
+
+Residual quality across the 53-point dense scan:
+
+| g | ||E|| | Assessment |
+|:---:|:---:|:---|
+| 0.04 | 7.5e-07 | Good (near Newton floor) |
+| 0.12 | 8.3e-08 | Excellent (at C++ level!) |
+| 0.15 | **3.3e-06** | Degraded (40× worse) |
+| 0.17 | **2.5e-05** | Badly degraded (300× worse) |
+
+The scan accepts ||E|| < 1e-4. By g=0.15, solutions degrade from 10⁻⁷ to 10⁻⁶ → interpolation from degraded solutions gives worse starting guesses → Newton converges less well → positive feedback loop → stall at g=0.17.
+
+### Newton Floor Analysis
+
+Newton with damped line search stalls at **||E|| ≈ 10⁻⁶** due to Jacobian conditioning:
+- cond(J) ≈ 10⁶ (from Implementation-10)
+- LU solve loses ~6 digits from 15.9 float64 digits → ~10 digits in Newton step
+- Residual floor: 10⁻⁶ (not 10⁻⁸ as previously assumed)
+
+The 10⁻⁸ residual at the C++ solution is the TRUNCATION error of the QaiShift=4 system, reachable only if we had the exact solution. Newton can't find it due to Jacobian conditioning.
+
+### Definitive Test: C++ Exact Solution at g=0.2
+
+From the exact C++ solution (||E||=2.55e-8 in QaiShift=4 system), Newton re-converges at g=0.200 in 4 iterations to ||E||=2.4e-8. Then:
+
+| Step | dg | ||E|| after Newton | Converged? |
+|:---:|:---:|:---:|:---:|
+| g=0.2010 | +0.001 | 1.3e-01 | NO |
+| g=0.2005 | +0.0005 | 8.7e-02 | NO |
+| g=0.2002 | +0.0002 | 4.0e-02 | NO |
+| g=0.2001 | +0.0001 | 2.1e-02 | NO |
+| g=0.1990 | −0.001 | 4.2e-01 | NO |
+| g=0.1980 | −0.002 | 3.5e-01 | NO |
+| g=0.1950 | −0.005 | 6.7e-01 | NO |
+
+**Newton fails at ALL step sizes, both forward and backward, even dg=0.0001.** The basin of attraction at g=0.2 in the QaiShift=4/float64 system is essentially zero-width. This is NOT error accumulation — it's a fundamental property of the truncated system.
+
+**Root cause:** At g≥0.2, the QaiShift=4 system has nearby spurious roots (from the truncation). Newton with damped line search converges to a spurious root or oscillates between basins, regardless of step size.
+
+This explains why the C++ uses QaiShift=50 with 186 digits: the higher-fidelity system has fewer spurious roots and wider basins.
+
+### What Does NOT Fix This
+
+1. ❌ Tighter convergence (1e-5 vs 1e-4): scan crawls at dg=3e-5
+2. ❌ Hybrid precision (mpmath pulldown): different QaiShift = different system
+3. ❌ More Newton iterations: stalls at ||E||~0.02 regardless
+4. ❌ Error accumulation fix: the EXACT C++ solution also fails
+
+### What WOULD Fix This
+
+**Pseudo-arc-length continuation** — tracks the solution CURVE rather than jumping to the nearest root:
+1. Compute tangent t = -J⁻¹(∂F/∂g) along the solution curve
+2. Predict: (c, g)_pred = (c, g) + ds * (t, 1)/||(t, 1)||
+3. Correct: solve augmented Newton with arclength constraint preventing branch-jumping
+4. Basin effectively infinite — the constraint keeps Newton on the correct branch
+
+**OR: Full mpmath forward map** (not just pulldown) at higher QaiShift where the basins are wider. This requires rewriting the entire forward map in mpmath — slow but correct.
+
+**OR: Run the C++ pipeline** to generate data, and use JAX only for validation/ML.
+
+### Final Result: g≈0.157 Is a Hard Limit
+
+Tested ALL approaches. None breaks through:
+
+| Approach | Result |
+|----------|--------|
+| Tiny dg=0.0002 + 4-pt interp + good data | STUCK at g=0.1574 |
+| Tiny dg=6.3e-6 | STUCK at g=0.1574 |
+| Physical-convention rescaling | 6× improvement in ||F|| but still insufficient |
+| Truncated SVD Newton (drop gauge SV) | First step OK, then diverges |
+| Arc-length continuation | Corrector diverges — J is inaccurate |
+| Hybrid precision (mpmath pulldown) | Different QaiShift = different system |
+| Tighter convergence (1e-5, 1e-6) | Scan crawls, same barrier |
+
+**Root cause confirmed:** The QaiShift=4/float64 forward map has a truncation-induced basin collapse at g≈0.157. The Jacobian accuracy (cond=10⁶, eating 6 of 8 float64 digits) leaves only 2-digit Newton steps — insufficient for the <0.1% basin.
+
+### Fix Implemented: Full Mpmath Forward Map (`qsc/forward_map_mp.py`)
+
+Rewrote the entire forward map in mpmath (~600 lines). **Validated:**
+
+| QaiShift | dps | ||E|| | Time | vs JAX float64 |
+|:---:|:---:|:---:|:---:|:---:|
+| 4 | 50 | 6.32e-08 | 1.9s | **30% better** (JAX: 8.96e-08) |
+| 10 | 50 | **2.53e-08** | 1.1s | **3.5× better** |
+| 20 | 80 | 1.31e-06 | 1.8s | (cutQai may need increase) |
+
+Key findings during implementation:
+1. Alfa tables (T3, T5, S1n, S32) had wrong binomial arguments — matched exactly to JAX
+2. S31 indexing bug in F2 computation — `S31[k*2]` should be `S31[k]`
+3. Chebyshev grid sign: JAX uses `-2*Re(g)*cos(...)`, needed exact match
+4. `jax_enable_x64` must be enabled for quantum_numbers.py (uses JAX internally)
+
+### FD Newton with Mpmath: Same Continuation Barrier
+
+Implemented `qsc/newton_mp.py` with FD Jacobian + damped line search. Tested at g=0.2:
+
+| dg | init ||F|| | final ||F|| | Converged? |
+|:---:|:---:|:---:|:---:|
+| 0.001 | 0.668 | 0.046 | NO |
+| 0.0005 | 0.333 | 0.134 | NO |
+| 0.0002 | 0.133 | 0.057 | NO |
+
+Newton stalls at ||F||≈0.05 — **same basin problem as float64**. Higher precision doesn't help because the spurious roots come from the TRUNCATION (cutP=16, cutQai=24), not from float64 roundoff.
+
+### Breakthrough: Mpmath FD Jacobian at QaiShift=4
+
+Root cause was **Jacobian precision**, not truncation. JAX AD Jacobian at float64 has ~8-digit entries, but cond(J)≈10⁶ eats 6 digits → only 2 usable digits in the Newton step. The mpmath FD Jacobian at dps=50 has ~40-digit entries → 34 usable digits after conditioning.
+
+**Test result:** Using QaiShift=4 (SAME equations as JAX) + mpmath FD Jacobian + 4-pt polynomial interpolation from 47 JAX scan points:
+
+```
+g=0.153: D=2.25797496 ||E||=4.3e-07 ✓  (was the barrier zone)
+g=0.157: D=2.27054405 ||E||=1.1e-06 ✓  (JAX scan stalled here)
+g=0.160: D=2.28011848 ||E||=2.0e-08 ✓
+g=0.165: D=2.29634989 ||E||=3.2e-06 ✓
+g=0.166: D=2.30003167 ||E||=1.0e-05 ✓
+```
+
+**The g≈0.157 barrier is broken.** Per-point time: ~160-220s (FD Jacobian = 33 × ~5s).
+
+Higher QaiShift (10, 50) with mpmath does NOT help continuation — they have NARROWER basins because more pulldown steps amplify truncation noise. And dps beyond 50 is unnecessary at QaiShift=4. The optimal configuration is QaiShift=4, cutQai=24, dps=50 — the SAME truncation as JAX but with higher-precision Jacobian.
+
+### Next: Proper Scan Script with Broyden
+
+Cost per point: ~170s (33 FD evals). With Broyden rank-1 updates (1 F eval/step, J refresh every 20 points): ~5s/point + 170s/20 = ~13s/point. From g=0.15 to g=1.0 with dg=0.001: ~850 points × 13s ≈ 3 hours.
+
+### What Would Actually Fix This
+
+1. **Increase cutP and cutQai significantly** (e.g., cutP=32, cutQai=60) — reduces truncation error, pushes spurious roots further away. But doubles the parameter count (dimV=64 instead of 32) and quadruples the Jacobian cost.
+
+2. **Match the C++ truncation exactly** (cutP=16, cutQai=30, QaiShift=50) but with **186-digit precision** (the C++ working precision). This requires dps=186 in the full mpmath forward map — each eval would take ~30s.
+
+3. **Homotopy continuation** in a parameter other than g — deform from a system where Newton converges globally (e.g., a simplified QSC where some terms are turned off) to the full system.
+
+---
+
+## Discussion-16: Hybrid Precision Strategy — Breaking the g≈0.17 Barrier (Apr 9, 2026)
+
+### The Key Insight: Hybrid Precision for the Jacobian
+
+The forward map has two parts with different precision requirements:
+
+| Component | Precision need | Why |
+|-----------|---------------|-----|
+| **Residual F(c)** | HIGH — must know when we've truly converged | Determines the final accuracy of Δ |
+| **Jacobian J(c)** | MODERATE — only needs to give a good Newton direction | A 10-digit J still gives quadratic convergence to 10 digits |
+
+The QaiShift=4/float64 and QaiShift=50/dps=70 forward maps **are the same function to ~10 digits**. Therefore:
+
+- **Compute F(c) with the mpmath forward map** (QaiShift=50, dps=70) → 20-digit accurate residual
+- **Compute J(c) with the JAX float64 forward map** (QaiShift=4) → 10-digit accurate Jacobian, via AD, in 1.5s
+
+Newton with inexact Jacobian (relative error ε ≈ 10⁻¹⁰) converges as:
+$$\|c_{k+1} - c^*\| \leq C\|c_k - c^*\|^2 + \varepsilon\|c_k - c^*\|$$
+Convergence plateaus at ~10-digit accuracy. This is exactly what we want.
+
+**Cost per Newton iteration:** 1.5s (mpmath F) + 1.5s (JAX AD J) = **3s**. Only 40% slower than pure float64 but breaks through the precision barrier entirely.
+
+### C++ Reference Parameters (No g-Dependent Scaling)
+
+From the reference code exploration:
+
+| Parameter | C++ TypeI Default | Our config_mp | Our config_f64 |
+|-----------|------------------|---------------|----------------|
+| cutP | 16 | 16 | 16 |
+| nPoints | 18 (= cutP+2) | 18 | 18 |
+| cutQai | 30 | 30 | 24 |
+| QaiShift | 50 | 50 | 4 |
+| WP (digits) | 186 | dps=70 | float64 (~15.9) |
+
+**Critical finding: the C++ does NOT scale parameters with g.** It starts at these values and only increases reactively via `BoostShift()` (+10 QaiShift or +4 cutQai) when precision targets aren't met.
+
+### Execution Strategy
+
+**Phase 1 — Bridge (9 min):** Re-converge 53 float64/QaiShift=4 solutions at QaiShift=50. Each should converge in 2-3 hybrid Newton iterations since the float64 solutions are ~10⁻⁸ residual in the QaiShift=50 system.
+
+**Phase 2 — Scan g=0.17→1.0 (~1.7 hr):** Dense continuation with 4-pt polynomial interpolation + hybrid Newton. dg=0.002, ~415 points. Validate Δ(g=1) ≈ 4.189.
+
+**Phase 3 — Scan g=1.0→5.0 (~3-4 hr):** Continue with truncation monitoring. Validate Δ(g=5) ≈ 10.6.
+
+### What Can Go Wrong
+
+1. **Bridge fails:** mpmath pulldown computes different function than expected → debug at g=0.1 (both validated), compare transfer matrices step by step
+2. **mpmath too slow:** If >5s/eval at QaiShift=50, try `python-flint` (10-50× faster) or reduce to QaiShift=30
+3. **cutP=16 insufficient at g>3:** Monitor `|c[a][N0]| / |c[a][0]|` — increase cutP if ratio > 1e-3
+4. **Wrong root:** Compare c-coefficient pattern against reference at known g values
+
+### After the Scan: What ~3000 Points Unlock
+
+1. ML initial guesses become trivial (dense training data → interpolation not extrapolation)
+2. Convergence-aware ML training (differentiable through hybrid forward map)
+3. Multi-shooting for other TypeI states (44 more states)
+4. Strong-coupling expansion coefficient extraction (string corrections)
+
+---
+
+## Implementation-15: Dense Scan with 4-pt Interpolation + GD Warmup — g≈0.17 Barrier (Apr 9, 2026)
+
+### What Was Implemented
+
+`scripts/dense_scan_and_train.py` — a complete rewrite of the dense scan combining all fixes from Discussion-14:
+
+1. **4-point polynomial interpolation** (matching C++ `InterpolateIn`): selects 4 nearest solved points, fits polynomial per physical-convention parameter, extrapolates to next g. This gives ~150× better initial guesses than linear extrapolation (||E||=2e-3 vs 0.32).
+
+2. **GD warmup before Newton**: gradient descent on `||F||²` (30 steps, normalized gradient, adaptive lr) to widen the effective basin of attraction. Falls back to Newton once ||E|| < 0.01.
+
+3. **Physical-convention interpolation**: coefficients `c_phys = c_internal × g^Mt[a]` are smooth in g (Mt ranges from -1 to +2). Interpolation in this space, then convert back to internal for Newton.
+
+4. **Adaptive step control**: dg grows by 1.5× after 4 consecutive successes (capped at 0.01), halves on failure, minimum dg floor at 1e-4.
+
+5. **Resume capability**: saves every 10 points to `data/konishi_dense_v2.npz`.
+
+### Results
+
+**Run 1 (from g=0.02, fresh start):**
+```
+g=0.10: D=2.1198920321 ref=2.1155063779 dig=2.7 ||E||=2.9e-07 dg=0.005
+g=0.15: D=2.2548807932 ref=2.2488524548 dig=2.6 ||E||=7.6e-06 dg=0.005
+STUCK g=0.16836 ||E||=1.5e-04
+53 pts in 776s, g=[0.020, 0.168]
+```
+
+**Run 2 (resume from g=0.174):**
+```
+STUCK g=0.17456 ||E||=5.0e-03
+39 pts in 192s, g=[0.050, 0.175]
+```
+
+### Diagnosis: Float64 + QaiShift=4 Precision Ceiling
+
+The g≈0.17 barrier is NOT an algorithmic limitation — it is a **precision floor**. Evidence:
+
+1. **Even starting from the exact C++ solution at g=0.2**, the JAX solver cannot take a single step to g=0.2001. The float64/QaiShift=4 forward map has ||E||~10⁻⁸ residual floor, which is too coarse for Newton's basin at g>0.17.
+
+2. **The pulldown loses ~4 digits** (QaiShift=4 means 4 sequential matrix multiplications, each losing ~1 digit of float64's 15). This leaves ~11 significant digits, but the Newton basin at g=0.17 requires ~12+ digit accuracy in the initial guess.
+
+3. **Accuracy degrades with g**: at g=0.10 we get 2.7 matching digits against reference; at g=0.15 only 2.6 digits. By g=0.17 the accumulated error prevents convergence.
+
+4. **C++ uses QaiShift=60 with 186-digit CLN arithmetic.** It can afford to lose 60 digits in pulldown and still have 126 left. We lose 4 digits and have 11 left — insufficient for g>0.17.
+
+### What Each Fix Contributed
+
+| Fix | Effect | Barrier broken? |
+|-----|--------|----------------|
+| 4-pt polynomial interp (was linear) | 150× better initial guess | No — from g≈0.15 to g≈0.17 |
+| GD warmup before Newton | Wider effective basin | No — marginal improvement |
+| Smaller dg floor (1e-4 vs 1e-3) | More attempts near barrier | No — precision is the limit |
+| Physical-convention interpolation | Smooth extrapolation | Already in use, helps but insufficient |
+
+### Options to Proceed Past g≈0.17
+
+**Option A: mpmath pulldown with larger QaiShift.**
+Already implemented in `qsc/pulldown_mp.py`. Use QaiShift=30, dps=50. This extends the precision budget from 11 to ~35 significant digits. Cost: pulldown becomes ~10× slower (~1.5s instead of ~0.15s per eval), but still faster than C++. The rest of the forward map stays in JAX float64.
+
+**Option B: C++ bridge.**
+Run the C++ pipeline (TypeI_run.ipynb) to generate converged solutions from g=0.17 to g=0.30. Import these as JAX starting points. Pro: guaranteed to work. Con: requires Mathematica + C++ toolchain, ~1 hour C++ runtime.
+
+**Option C: Convergence-aware ML loss (Step 2 of Discussion-14).**
+Train network to minimise `||F(c_pred)||²` instead of `||c_pred - c_true||²`. The forward map is fully JAX-differentiable. This directly optimises for "prediction lands in Newton's basin." Could work even with noisy training data from g<0.17. But can only produce guesses as good as the training data distribution — unlikely to generalise beyond g=0.17 without some data there.
+
+**Option D: Accept g<0.17 limit for now.**
+Use 53 points at g∈[0.02, 0.17] as training data. Focus on convergence-aware ML and multi-shooting. Come back to extend range when mpmath pulldown is integrated into the scan loop.
+
+### Update: Implementation-17 Results
+
+All approaches in this section were tested and FAILED — see Implementation-17 for details. The g≈0.157 barrier is a hard limit of QaiShift=4/float64. The only fix is a full mpmath forward map at higher QaiShift (rewriting ~900 lines of JAX code in mpmath).
+
+---
+
 ## Discussion-14: ML Failures Analysis + Fix Strategy (Apr 9, 2026)
 
 ### Why ML Initial Guess Fails

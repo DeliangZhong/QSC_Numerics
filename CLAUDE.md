@@ -10,9 +10,10 @@ Full specification: @discussion_AI.md
 
 ## Architecture
 
-- `reference/qsc/` — **read-only** reference implementation (C++ cores + Mathematica/Jupyter orchestration). Do not modify.
+- `reference/qsc/` — **read-only** reference implementation (C++ cores + Mathematica/Jupyter orchestration). Do not modify. Do NOT run the C++ pipeline to generate data — it is strictly a reference for understanding the algorithm and validating against pre-existing fixtures.
 - New code follows the structure in Section 4 of the implementation guide (`qsc/` Python package).
 - Reference C++ uses the CLN library for arbitrary-precision arithmetic. New code uses JAX (`float64`) with optional `mpmath` for high-precision refinement.
+- All computation must be done in the JAX/Python solver. The C++ is for reading and understanding, not for running.
 
 ## Key Constraints
 
