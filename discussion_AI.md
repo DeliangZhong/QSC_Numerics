@@ -10,6 +10,32 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-21: QR-Stabilised Pulldown — Does NOT Work (Apr 10, 2026)
+
+### Hypothesis
+
+QR re-orthogonalization every L=2 steps during the pulldown prevents parasitic mode growth. With QR stabilization, QaiShift=30+ should work at float64.
+
+### Result: FAILS
+
+| QaiShift | Without QR | With QR (L=2) |
+|:---:|:---:|:---:|
+| 4 | 8.96e-08 | 2.12e-07 |
+| 10 | 3.81e-06 | **4.31e-03** |
+| 30 | 6.17e-04 | **9.73e+01** |
+
+QR makes it WORSE at higher QaiShift. The reconstruction step `Q = Q_orth @ R_accumulated` reintroduces the full precision loss because `R_accumulated` has condition number ~10^QaiShift.
+
+### Root Cause
+
+The QR prevents error growth DURING the march. But the R factor captures the parasitic mode amplitudes. The final reconstruction `Q_physical = Q_orth @ R` requires multiplying by R (which has entries ~10^QaiShift), losing the same digits that the QR was meant to preserve. The precision loss is fundamental to the reconstruction, not to the marching.
+
+### Conclusion
+
+Any approach that produces the physical Q by reconstructing from separated modes will have this problem. The fix must avoid sequential propagation entirely → **spectral Q-solver** (Phase 2 of the plan).
+
+---
+
 ## Implementation-20: Hybrid (Flint F + JAX AD J) — Does NOT Work (Apr 10, 2026)
 
 ### Hypothesis
