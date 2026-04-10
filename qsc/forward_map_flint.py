@@ -514,6 +514,15 @@ def forward_map_flint(params: np.ndarray, qn: QuantumNumbers,
     alfa = compute_alfa(Mt, Mhat)
     Nas = compute_Nas(Mtint, kettoLAMBDA)
     gauge_info = compute_gauge_info(Mtint, N0)
+
+    # Convert JAX arrays to numpy ONCE — JAX __getitem__ is 100× slower
+    # than numpy indexing due to JIT dispatch overhead
+    A_arr = np.array(A_arr, dtype=np.complex128)
+    Mt = np.array(Mt, dtype=np.float64)
+    AA = np.array(AA, dtype=np.complex128)
+    BB = np.array(BB, dtype=np.complex128)
+    alfa = np.array(alfa, dtype=np.complex128)
+    Mhat = np.array(Mhat, dtype=np.complex128)
     Nch = gauge_info["Nch"]
     gauge_indices = gauge_info["gauge_indices"]
 
