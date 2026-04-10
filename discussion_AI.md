@@ -10,6 +10,52 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Discussion-18: Speed Assessment — Mpmath Scan vs C++ (Apr 10, 2026)
+
+### The Core Problem
+
+The original project goal was 50-100× speedup over C++ via JAX float64 + AD Jacobian. This works at g<0.15 (~4s/point, 5× faster than C++). But past g≈0.15, the float64 AD Jacobian lacks precision (cond(J)≈10⁶ eats 6 of 8 digits → 2-digit Newton steps), forcing a fallback to arbitrary-precision FD Jacobian.
+
+### Speed Comparison
+
+| Approach | Per point | g=0→1.0 | vs C++ |
+|----------|-----------|---------|--------|
+| **C++ (186-digit CLN)** | ~20s | ~3-4 hrs | baseline |
+| JAX float64 + AD (g<0.15 only) | ~4s | N/A (stalls) | **5× faster** |
+| mpmath FD Jacobian | ~170s | ~40 hrs | **8× slower** |
+| mpmath + Broyden (refresh=3) | ~50s | ~12 hrs | **3× slower** |
+| python-flint FD (estimated) | ~10-30s | ~3-8 hrs | **~1× (parity)** |
+
+### Why JAX Loses Its Advantage at g>0.15
+
+The JAX speedup comes from two sources:
+1. **Float64 arithmetic** (50× faster than 186-digit CLN) — but insufficient precision for Jacobian at g>0.15
+2. **AD Jacobian** (1 reverse pass vs 32 FD evals) — but AD requires float64 tracing, can't go through mpmath
+
+At g>0.15, both advantages are lost: we need arbitrary precision (no float64 speedup) computed via FD (no AD speedup). The result is C++-comparable speed at best.
+
+### The Fundamental Constraint
+
+The Jacobian condition number cond(J)≈10⁶ is a **physical property** of the QSC equations, not an implementation issue. Any solver using float64 arithmetic loses 6 of 15.9 available digits to conditioning, leaving ~10 digits for the Newton step. At g<0.15, this is sufficient (basins are wide). At g>0.15, basins narrow below 10⁻³, requiring >3-digit Newton steps — which float64 can barely provide.
+
+The C++ solves this by using 186 digits (186 - 6 = 180 usable digits — massive margin). Our mpmath at dps=50 gives 50 - 6 = 44 usable digits (also sufficient, but slow due to Python loops).
+
+### Options Forward
+
+1. **Accept the speed**: mpmath + Broyden gives ~50s/point. Full curve in ~12 hours. Not 50× faster than C++ but functionally equivalent.
+
+2. **python-flint**: C-compiled arbitrary precision. Expected ~10-30s/point, matching C++ speed. Algorithm stays identical, only the arithmetic backend changes.
+
+3. **Hybrid approach**: Use JAX float64 for g<0.15 (fast, 4s/point), switch to mpmath/flint for g>0.15 (slower but necessary). Total: ~4 hours (vs C++ ~3-4 hours).
+
+4. **Improve the Jacobian conditioning**: Reformulate the forward map to reduce cond(J). This is a research problem — the conditioning comes from the g-dependent denormalization (c_internal = c_phys / g^Mt) and the wide range of Mt values ([-1, 0, 1, 2]). A better-conditioned formulation would restore the float64+AD advantage at all g.
+
+### Assessment
+
+Option 4 is the only path to the original 50-100× speedup goal. Options 1-3 achieve C++ parity but not speedup. The immediate practical path is Option 3 (hybrid JAX+mpmath), which generates the full curve in ~4 hours — comparable to C++ but in pure Python/JAX without needing the C++ toolchain.
+
+---
+
 ## Implementation-17: Diagnostic — Hybrid Precision Fails, Root Cause Identified (Apr 9, 2026)
 
 ### Hybrid Precision Does NOT Work
