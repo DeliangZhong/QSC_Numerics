@@ -10,6 +10,53 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-22: Spectral Q-Solver — Three Approaches, All Fail (Apr 10, 2026)
+
+### Goal
+
+Eliminate the pulldown entirely by solving for Q directly at probe points. Three approaches tested:
+
+### Approach A: Spectral Collocation (1/u basis)
+
+Expand Q_{a|i}(u) = u^α Σ_n q_n u^{-2n}, evaluate QQ-relation at collocation points.
+
+**Result:** ||E||=4.4×10¹⁴. The 1/u expansion DIVERGES at probe points (|u|≈0.5, radius of convergence ≈ ∞ but the series is asymptotic/divergent).
+
+### Approach B: Spectral Collocation (1/x Zhukovsky basis)
+
+Switch to Q = (gx)^α Σ_n q_n x^{-2n} (convergent for |x|>r<1). Evaluate QQ-relation at UHP collocation points.
+
+**Result:** ||E||=11.7 (improved). Q_upper[0,0,0] matches standard to 4 digits. But the spectral system has **rank 16 out of 48** — massively rank-deficient. The QQ-relation is a TRANSFER relation (relates Q+ to Q-), not a constraint: it's automatically satisfied by both the physical AND parasitic modes. Cannot distinguish between them without additional boundary conditions.
+
+Multi-height collocation (heights 1..20) gives the SAME rank: 16. Adding more collocation points adds no new information.
+
+### Approach C: Basis Conversion (1/u → 1/x, then evaluate)
+
+Compute b-coefficients normally (they're accurate), convert from 1/u to 1/x basis using Q'_m = Σ_n q_n g^{α-2n} C(α-2n, m-n), evaluate in convergent x-basis.
+
+**Result:** ||E||=1.9×10²⁵ (catastrophically divergent). The 1/u expansion is a **divergent asymptotic series**: b-coefficients grow as |b[n]| ~ 10^{2n}. The conversion amplifies: |q_n * g^{α-2n}| grows as 10^{3n} per term. The basis conversion sum diverges.
+
+### Root Cause Analysis
+
+The pulldown works because it implicitly **resums the divergent 1/u series** through sequential matrix multiplications. The physical Q at the cut is exponentially small compared to the parasitic mode — this information is encoded in cancellations within the matrix product, NOT in the individual coefficients.
+
+Any approach that:
+1. Tries to evaluate Q from coefficients → diverges (Approach A, C)
+2. Tries to solve for Q from the QQ-relation alone → underdetermined (Approach B)
+3. Tries to factor the matrix product (QR) → ill-conditioned reconstruction (Implementation-21)
+
+The ONLY path that avoids these issues: **solve the pulldown in higher arithmetic precision** (the flint approach), which preserves enough digits through the sequential multiplications.
+
+### What Would Actually Work
+
+A true spectral approach requires solving for Q in a CONVERGENT basis (1/x) with constraints beyond the QQ-relation — specifically, the gluing conditions AND the asymptotic normalization, simultaneously. This would be a global reformulation of the QSC as a single large linear system in the Q-coefficients, not just the local QQ-relation. This is a significant research problem beyond the current implementation scope.
+
+### Current Best Approach
+
+The **flint FD Jacobian** (68ms/eval, 2.2s/Jacobian) with adaptive Broyden refresh reaches g=0.183 in 146s. The barrier at g≈0.183 is from the QaiShift=4 truncation error floor (residual rises to ~10⁻⁴), not from speed or precision.
+
+---
+
 ## Implementation-21: QR-Stabilised Pulldown — Does NOT Work (Apr 10, 2026)
 
 ### Hypothesis
