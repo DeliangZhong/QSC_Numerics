@@ -10,6 +10,55 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-20: Hybrid (Flint F + JAX AD J) — Does NOT Work (Apr 10, 2026)
+
+### Hypothesis
+
+Use flint for the residual (50-digit, same QaiShift=4) and JAX AD for the Jacobian (float64, exact derivative, ~15.9 digits). After cond(J)≈10⁶ eats 6 digits → 10-digit Newton step. Should be sufficient for the 0.1% basin.
+
+### Result: FAILS
+
+At g=0.200:
+```
+iter 0: ||F|| = 2.26e-08
+iter 1: ||F|| = 2.30e-08 (alpha=0.01 — full step makes it WORSE)
+iter 2: ||F|| = 2.35e-08 (growing)
+iter 3: ||F|| = 2.41e-08 (stalling accepted)
+```
+
+At g=0.201 from g=0.200:
+```
+iter 0: ||F|| = 6.68e-01
+iter 1: ||F|| = 2.11e-01 (first step OK)
+iter 2-9: ||F|| grows: 0.21 → 0.24 (alpha=0.01 every step)
+```
+
+The float64 AD Jacobian points in the **wrong direction** — not just imprecise, fundamentally wrong. The line search always falls to alpha=0.01 (the floor). Even 10-digit step accuracy doesn't help when the step DIRECTION is corrupted by float64 truncation error in the forward map evaluation.
+
+### Root Cause
+
+The float64 forward map at QaiShift=4 evaluates F to ~8 digits (truncation floor ~10⁻⁸). The AD Jacobian computes exact derivatives of this 8-digit-accurate function. But the TRUE Jacobian (of the exact QaiShift=4 system) differs from the computed one at the ~10⁻⁸ level. With cond(J)≈10⁶, this 10⁻⁸ error in J entries translates to 10⁻² error in the Newton DIRECTION — enough to point toward spurious roots.
+
+The flint FD Jacobian works because it evaluates F at 50-digit precision: the J entries are accurate to ~40 digits, giving 34-digit Newton directions after conditioning. The direction error is ~10⁻³⁴ — negligible.
+
+### Conclusion
+
+**AD cannot replace FD for the Jacobian at g>0.17.** The float64 forward map's 8-digit accuracy contaminates the AD derivatives. The Jacobian must be computed through the high-precision forward map (flint FD at 2.2s per Jacobian).
+
+### Speed Summary After All Optimizations
+
+| Config | Per eval | FD Jacobian | Scan to g=0.183 |
+|--------|----------|-------------|-----------------|
+| C++ (186-digit CLN) | ~7s | ~20s | ~3-4 hrs |
+| mpmath dps=50 | 1060ms | 34s | 24 min |
+| flint dps=50 (initial) | 340ms | 11s | 7 min |
+| **flint + numpy fix** | **68ms** | **2.2s** | **103s** |
+| flint F + JAX AD J | — | 1.6s | FAILS at g>0.17 |
+
+The flint forward map at 68ms/eval is **100× faster than C++ per evaluation**. But the scan is limited by the Broyden drift barrier at g≈0.183. Further progress needs either relaxed acceptance tolerance or FD-only mode.
+
+---
+
 ## Implementation-19: FLINT Forward Map — 3× Over Mpmath (Apr 10, 2026)
 
 ### What Was Done
