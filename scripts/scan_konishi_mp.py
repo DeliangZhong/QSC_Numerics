@@ -39,9 +39,9 @@ Mt = np.array([2., 1., 0., -1.])
 
 ACCEPT_TOL = 5e-5
 DG_INIT = 0.001
-DG_MIN = 5e-5
-DG_MAX = 0.002
-BROYDEN_REFRESH = 3  # frequent J refresh prevents Broyden drift
+DG_MIN = 1e-5
+DG_MAX = 0.005
+MAX_BROYDEN_AGE = 5  # force FD refresh after this many g-points
 SCAN_FILE = "data/konishi_mp_scan.npz"
 
 # Gauge info (computed once)
@@ -114,73 +114,75 @@ def fd_jacobian(V, g, F0):
     return J
 
 
-def newton_solve(V0, g, J_init=None, max_iter=10):
-    """Damped Newton in V-space with optional Broyden.
+def newton_solve(V0, g, J_inv_init=None, max_iter=10):
+    """Newton in V-space with adaptive Broyden/FD refresh.
 
-    If J_init is provided, uses Broyden rank-1 updates.
-    Returns (V, norm, n_iter, converged, J).
+    If J_inv_init is provided, starts with Broyden. If a Broyden step
+    fails to reduce ||F|| by 50%, immediately recomputes full FD Jacobian.
+
+    Returns (V, norm, n_iter, converged, J_inv, refreshed).
+    refreshed=True means a fresh FD Jacobian was computed.
     """
     V = V0.copy()
-    use_broyden = J_init is not None
-
     Fval = F_V(V, g)
-    norm0 = float(np.max(np.abs(Fval)))
+    norm = float(np.max(np.abs(Fval)))
+    refreshed = False
 
-    if use_broyden:
-        J = J_init.copy()
+    if J_inv_init is not None:
+        J_inv = J_inv_init.copy()
     else:
         J = fd_jacobian(V, g, Fval)
-
-    J_inv = np.linalg.inv(J)
+        J_inv = np.linalg.inv(J)
+        refreshed = True
 
     for i in range(max_iter):
-        Fval = F_V(V, g)
-        norm = float(np.max(np.abs(Fval)))
-
         if norm < 1e-10:
-            return V, norm, i, True, J
+            return V, norm, i, True, J_inv, refreshed
 
         delta = -J_inv @ Fval
 
-        # Backtracking line search
-        alpha = 1.0
-        best_alpha = alpha
-        best_norm = norm
-        for _ in range(10):
-            V_trial = V + alpha * delta
-            F_trial = F_V(V_trial, g)
-            n_trial = float(np.max(np.abs(F_trial)))
-            if n_trial < best_norm:
-                best_norm = n_trial
-                best_alpha = alpha
-            if n_trial < norm:
-                break
-            alpha *= 0.5
-        else:
-            alpha = best_alpha
-
-        V_new = V + alpha * delta
+        # Take step and check quality
+        V_new = V + delta
         F_new = F_V(V_new, g)
         norm_new = float(np.max(np.abs(F_new)))
 
+        # If step didn't help, try FD refresh or damping
+        if norm_new > 0.5 * norm:
+            if not refreshed:
+                # Broyden drifted — recompute fresh FD Jacobian
+                J = fd_jacobian(V, g, Fval)
+                J_inv = np.linalg.inv(J)
+                refreshed = True
+                delta = -J_inv @ Fval
+                V_new = V + delta
+                F_new = F_V(V_new, g)
+                norm_new = float(np.max(np.abs(F_new)))
+
+            # If still not helping, try damped steps
+            if norm_new > 0.5 * norm:
+                for alpha in [0.5, 0.25, 0.1, 0.01]:
+                    V_trial = V + alpha * delta
+                    F_trial = F_V(V_trial, g)
+                    n_trial = float(np.max(np.abs(F_trial)))
+                    if n_trial < norm:
+                        V_new, F_new, norm_new = V_trial, F_trial, n_trial
+                        break
+
         # Broyden rank-1 update of J_inv
-        if use_broyden:
-            dx = V_new - V
-            df = F_new - Fval
+        dx = V_new - V
+        df = F_new - Fval
+        denom = dx @ (J_inv @ df)
+        if abs(denom) > 1e-50:
             u = dx - J_inv @ df
-            denom = dx @ (J_inv @ df)
-            if abs(denom) > 1e-30:
-                J_inv = J_inv + np.outer(u, dx @ J_inv) / denom
+            J_inv = J_inv + np.outer(u, dx @ J_inv) / denom
 
-        V = V_new
+        V, Fval, norm = V_new, F_new, norm_new
 
-        # Stalling: accept if small
-        if i >= 2 and norm_new < ACCEPT_TOL:
-            return V, norm_new, i + 1, True, J
+        # Stalling: accept if small enough
+        if i >= 2 and norm < ACCEPT_TOL:
+            return V, norm, i + 1, True, J_inv, refreshed
 
-    Fval = F_V(V, g)
-    norm = float(np.max(np.abs(Fval)))
-    return V, norm, max_iter, norm < ACCEPT_TOL, J
+    return V, norm, max_iter, norm < ACCEPT_TOL, J_inv, refreshed
 
 
 def load_reference_data():
@@ -219,8 +221,8 @@ def main():
     g = solved_g[-1]
     dg = DG_INIT
     success_count = 0
-    J_current = None  # will be computed on first point
-    points_since_J = 0
+    J_inv_current = None  # will be computed on first point
+    broyden_age = 0
     t_start = time.time()
 
     while g < 1.0:
@@ -232,23 +234,24 @@ def main():
         V_pred = np.array(params_to_V(params_pred, gauge_indices, N0),
                           dtype=np.complex128)
 
-        # Decide: full FD Jacobian or Broyden
-        if J_current is None or points_since_J >= BROYDEN_REFRESH:
-            t0 = time.time()
-            V_new, norm, n_iter, converged, J_new = newton_solve(
-                V_pred, g_new, J_init=None, max_iter=10
+        # Use Broyden if we have a recent J_inv, otherwise FD
+        if J_inv_current is None or broyden_age >= MAX_BROYDEN_AGE:
+            V_new, norm, _, converged, J_inv_new, _ = newton_solve(
+                V_pred, g_new, J_inv_init=None, max_iter=10
             )
-            dt = time.time() - t0
-            J_current = J_new
-            points_since_J = 0
+            J_inv_current = J_inv_new
+            broyden_age = 0
             mode = "FD"
         else:
-            t0 = time.time()
-            V_new, norm, n_iter, converged, J_new = newton_solve(
-                V_pred, g_new, J_init=J_current, max_iter=8
+            V_new, norm, _, converged, J_inv_new, refreshed = newton_solve(
+                V_pred, g_new, J_inv_init=J_inv_current, max_iter=8
             )
-            dt = time.time() - t0
-            mode = "Br"
+            J_inv_current = J_inv_new
+            if refreshed:
+                broyden_age = 0
+                mode = "FD*"
+            else:
+                mode = "Br"
 
         if converged or norm < ACCEPT_TOL:
             g = g_new
@@ -260,7 +263,7 @@ def main():
             solved_Delta.append(D)
             solved_phys.append(phys.copy())
             success_count += 1
-            points_since_J += 1
+            broyden_age += 1
 
             # Adaptive dg: grow after successes
             if success_count > 4 and dg < DG_MAX:
@@ -291,7 +294,8 @@ def main():
             dg /= 2
             success_count = 0
             # Force J refresh on failure
-            J_current = None
+            J_inv_current = None
+            broyden_age = 0
             if dg < DG_MIN:
                 print(f"STUCK g={g_new:.5f} ||E||={norm:.1e} dg<{DG_MIN:.0e}",
                       flush=True)
