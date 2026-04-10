@@ -19,7 +19,10 @@ import numpy as np
 import jax
 jax.config.update("jax_enable_x64", True)
 
-from qsc.forward_map_mp import forward_map_mp
+try:
+    from qsc.forward_map_flint import forward_map_flint as forward_map_mp
+except ImportError:
+    from qsc.forward_map_mp import forward_map_mp
 from qsc.forward_map import params_to_V, V_to_params
 from qsc.quantum_numbers import KONISHI, compute_gauge_info, compute_Mtint
 

@@ -10,6 +10,36 @@
   - When adding a new entry, prepend it above the previous top entry.
 -->
 
+## Implementation-19: FLINT Forward Map — 3× Over Mpmath (Apr 10, 2026)
+
+### What Was Done
+
+Ported `forward_map_mp.py` (mpmath, pure Python) to `forward_map_flint.py` (python-flint, C-compiled FLINT/Arb library). Same algorithm, same QaiShift=4, same dps=50. Drop-in replacement.
+
+### Results
+
+| Metric | mpmath | flint | Speedup |
+|--------|--------|-------|---------|
+| Per forward eval | 1.06s | 0.34s | **3.1×** |
+| FD Jacobian (32 evals) | ~34s | ~11s | **3.1×** |
+| Full scan to g=0.172 | 24 min | **7 min** | **3.2×** |
+| Agreement | — | diff=0.000 | exact match |
+
+The 3× (not 17×) speedup is because Python loop overhead dominates over the arithmetic speedup at this problem size. The loops iterate over small arrays (4×4 matrices, 12 b-coefficient terms, 18 grid points) — each iteration is fast in either backend, but Python's function call and object creation overhead is the bottleneck.
+
+### Path to Further Speedup
+
+To get the full 17× from FLINT's arithmetic advantage, need to move the Python loops to C:
+- Cython wrapper around the b-coefficient recurrence (~100 sequential 4×4 solves)
+- Or: single C extension using FLINT's C API directly
+- Expected: another 3-5× on top of current 3× → **10-15× over mpmath**
+
+### Scan Result
+
+Same reach as mpmath (g=0.172) — the barrier is from Broyden drift, not arithmetic speed. Further progress needs either more frequent J refresh or FD-only mode (now feasible at ~11s/Jacobian with flint).
+
+---
+
 ## Discussion-18: Speed Assessment — Mpmath Scan vs C++ (Apr 10, 2026)
 
 ### The Core Problem
