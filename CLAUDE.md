@@ -6,18 +6,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Reimplementation and acceleration of the Quantum Spectral Curve (QSC) numerical solver for planar N=4 Super-Yang-Mills theory. The existing C++/Mathematica solver lives in `reference/qsc/` as a read-only baseline. New optimized code targets JAX/Python with 50-100x speedup.
 
-Full specification: @discussion_AI.md
-
 ## Architecture
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full module map, scripts, data layout, and current frontier.
+
 - `reference/qsc/` — **read-only** reference implementation (C++ cores + Mathematica/Jupyter orchestration). Do not modify. Do NOT run the C++ pipeline to generate data — it is strictly a reference for understanding the algorithm and validating against pre-existing fixtures.
-- New code follows the structure in Section 4 of the implementation guide (`qsc/` Python package).
-- Reference C++ uses the CLN library for arbitrary-precision arithmetic. New code uses JAX (`float64`) with optional `mpmath` for high-precision refinement.
-- All computation must be done in the JAX/Python solver. The C++ is for reading and understanding, not for running.
+- `qsc/` — JAX/Python solver package. Three precision tiers: JAX float64, mpmath, FLINT/Arb.
+- `scripts/` — Scan and diagnostic scripts. `scan_konishi_mp.py` is the main production scan.
+- `data/` — Scan results and ML weights (`.npz` files).
+- `discussion_AI.md` — Development log (large, do not auto-load; read specific entries on demand).
 
 ## Key Constraints
 
-- **Validate against reference data**: every new module must be cross-checked against the existing C++/Mathematica outputs before being considered correct. Reference numerical data is in `reference/qsc/local operators N4 SYM/data/numerical/` (.mx Mathematica files).
+- **Validate against reference data**: every new module must be cross-checked against the existing C++/Mathematica outputs before being considered correct. Reference numerical data is in `reference/qsc/local operators N4 SYM/data/numerical/` (.mx Mathematica files). Konishi C++ converged data (85 points, g=0.001–1.0, full c-coefficients) is in `reference/qsc/local operators N4 SYM/data/output/numerical_data_Delta02_b10_b20_f11_f21_f31_f41_a10_a20_sol1.mx`. Portable exports: `data/konishi_cpp_reference.json`, `data/konishi_gDelta.csv`.
 - **JAX-traceable forward map**: the core computation `(coefficients, Δ) → residual` must be written in pure functional style (no in-place mutation) for automatic differentiation to work.
 - **Branch cut handling**: the Zhukovsky map has a cut on `[-2g, 2g]`. Use `jnp.where` for sheet selection, never rely on default `jnp.sqrt` branch.
 
@@ -46,7 +47,7 @@ The reference code has four type classifications based on symmetry:
 
 ## Validation Checkpoints
 
-- Konishi Δ(g=1) ≈ 4.189
+- Konishi Δ(g=1) ≈ 5.604
 - Konishi at weak coupling must match 8-loop perturbation theory
 - AD Jacobian vs finite-difference Jacobian: agree to ~10⁻⁷ (float64)
 - All 219 states with Δ₀ ≤ 6 have reference data available

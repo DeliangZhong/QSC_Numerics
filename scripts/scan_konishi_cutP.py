@@ -1,10 +1,13 @@
-"""Konishi scan with mpmath FD Jacobian + Broyden acceleration.
+"""Konishi scan with larger cutP (N0=10, i.e., 10 c-coefficients per a).
 
-Phase 1: Use JAX float64 scan data (g<0.15) as interpolation base
-Phase 2: Continue with mpmath FD Newton past the g≈0.157 barrier
-Phase 3: Broyden rank-1 updates after first FD Jacobian (13s/pt vs 170s/pt)
+Discovery: at g=0.18, the real barrier is cutP=16 (not QaiShift). Increasing
+to cutP=20 drops ||E|| from 3e-5 to 1e-7 after Newton.
 
-Usage: python scripts/scan_konishi_mp.py [--resume]
+Uses flint forward map with FD Jacobian (matching Implementation-23 approach
+but at cutP=20). Bootstraps from existing QS=4 scan data (cutP=16), padding
+c-coefficients with zeros for the new high-n components.
+
+Usage: python scripts/scan_konishi_cutP.py [--cutP=N] [--trim-to=G] [--fresh]
 """
 
 import os
@@ -14,44 +17,38 @@ import math
 import time
 
 import numpy as np
-
-# Ensure float64 for quantum_numbers
 import jax
 jax.config.update("jax_enable_x64", True)
 
-try:
-    from qsc.forward_map_flint import forward_map_flint as forward_map_mp
-except ImportError:
-    from qsc.forward_map_mp import forward_map_mp
-from qsc.forward_map import params_to_V, V_to_params
+from qsc.forward_map import V_to_params, params_to_V
+from qsc.forward_map_flint import forward_map_flint
 from qsc.quantum_numbers import KONISHI, compute_gauge_info, compute_Mtint
 
-# --- Config ---
-CUTP = 16
-NPOINTS = 18
-CUTQAI = 24
-QAISHIFT = 8    # was 4; optimal balance of truncation vs pulldown amplification
-DPS = 100        # was 50; headroom for QS=8 pulldown
-FD_H = 1e-8      # was 1e-10; better SNR with QS=8 floor ~1e-8
 
-N0 = CUTP // 2
+# --- Config ---
+CUTP = 20  # was 16 in the original scan (N0=10 vs N0=8)
+NPOINTS = CUTP + 2
+CUTQAI = 24
+QAISHIFT = 8
+DPS = 50
+FD_H = 1e-6  # need moderate h for cutP=20
+
+N0 = CUTP // 2  # 10
 Mt = np.array([2., 1., 0., -1.])
 
-ACCEPT_TOL = 5e-5  # keep same as QS=4; QS=8 floor is lower so scan reaches further
+ACCEPT_TOL = 5e-5
 DG_INIT = 0.001
 DG_MIN = 1e-5
 DG_MAX = 0.005
-MAX_BROYDEN_AGE = 5  # force FD refresh after this many g-points
-SCAN_FILE = "data/konishi_mp_scan.npz"  # resume from existing QS=4 data
+MAX_BROYDEN_AGE = 5
+SCAN_FILE = "data/konishi_cutp20_scan.npz"
 
-# Gauge info (computed once)
 Mtint = compute_Mtint(KONISHI)
 gauge_info = compute_gauge_info(Mtint, N0)
 gauge_indices = gauge_info["gauge_indices"]
 
 
 def i2p(params, g):
-    """Internal → physical convention."""
     phys = np.zeros(1 + 4 * N0)
     phys[0] = float(np.real(params[0]))
     for a in range(4):
@@ -65,7 +62,6 @@ def i2p(params, g):
 
 
 def p2i(phys, g):
-    """Physical → internal convention."""
     internal = np.zeros(1 + 4 * N0, dtype=np.complex128)
     internal[0] = phys[0] + 0j
     for a in range(4):
@@ -78,8 +74,18 @@ def p2i(phys, g):
     return internal
 
 
+def pad_phys_from_cutP16(phys_old, g, N0_old=8):
+    """Pad phys from cutP=16 (N0=8) to current N0, zero-filling new entries."""
+    phys_new = np.zeros(1 + 4 * N0)
+    phys_new[0] = phys_old[0]
+    for a in range(4):
+        s_old = 1 + a * N0_old
+        s_new = 1 + a * N0
+        phys_new[s_new:s_new + N0_old] = phys_old[s_old:s_old + N0_old]
+    return phys_new
+
+
 def poly_interp(solved_g, solved_phys, g_new):
-    """4-point polynomial interpolation in physical convention."""
     n_interp = min(4, len(solved_g))
     dists = [abs(gg - g_new) for gg in solved_g]
     idxs = sorted(range(len(solved_g)), key=lambda i: dists[i])[:n_interp]
@@ -95,34 +101,24 @@ def poly_interp(solved_g, solved_phys, g_new):
 
 
 def F_V(V, g):
-    """Forward map in gauge-reduced V-space."""
     params = np.array(V_to_params(V, gauge_indices, N0), dtype=np.complex128)
-    return forward_map_mp(params, KONISHI, g,
-                          cutP=CUTP, nPoints=NPOINTS,
-                          cutQai=CUTQAI, QaiShift=QAISHIFT, dps=DPS)
+    return forward_map_flint(params, KONISHI, g,
+                              cutP=CUTP, nPoints=NPOINTS,
+                              cutQai=CUTQAI, QaiShift=QAISHIFT, dps=DPS)
 
 
 def fd_jacobian(V, g, F0):
-    """Finite-difference Jacobian in V-space (square: dimV × dimV)."""
     n = len(V)
     m = len(F0)
     J = np.zeros((m, n), dtype=np.complex128)
     for j in range(n):
-        V_pert = V.copy()
-        V_pert[j] += FD_H
-        J[:, j] = (F_V(V_pert, g) - F0) / FD_H
+        Vp = V.copy()
+        Vp[j] += FD_H
+        J[:, j] = (F_V(Vp, g) - F0) / FD_H
     return J
 
 
 def newton_solve(V0, g, J_inv_init=None, max_iter=10):
-    """Newton in V-space with adaptive Broyden/FD refresh.
-
-    If J_inv_init is provided, starts with Broyden. If a Broyden step
-    fails to reduce ||F|| by 50%, immediately recomputes full FD Jacobian.
-
-    Returns (V, norm, n_iter, converged, J_inv, refreshed).
-    refreshed=True means a fresh FD Jacobian was computed.
-    """
     V = V0.copy()
     Fval = F_V(V, g)
     norm = float(np.max(np.abs(Fval)))
@@ -140,16 +136,12 @@ def newton_solve(V0, g, J_inv_init=None, max_iter=10):
             return V, norm, i, True, J_inv, refreshed
 
         delta = -J_inv @ Fval
-
-        # Take step and check quality
         V_new = V + delta
         F_new = F_V(V_new, g)
         norm_new = float(np.max(np.abs(F_new)))
 
-        # If step didn't help, try FD refresh or damping
         if norm_new > 0.5 * norm:
             if not refreshed:
-                # Broyden drifted — recompute fresh FD Jacobian
                 J = fd_jacobian(V, g, Fval)
                 J_inv = np.linalg.inv(J)
                 refreshed = True
@@ -158,7 +150,6 @@ def newton_solve(V0, g, J_inv_init=None, max_iter=10):
                 F_new = F_V(V_new, g)
                 norm_new = float(np.max(np.abs(F_new)))
 
-            # If still not helping, try damped steps
             if norm_new > 0.5 * norm:
                 for alpha in [0.5, 0.25, 0.1, 0.01]:
                     V_trial = V + alpha * delta
@@ -168,7 +159,6 @@ def newton_solve(V0, g, J_inv_init=None, max_iter=10):
                         V_new, F_new, norm_new = V_trial, F_trial, n_trial
                         break
 
-        # Broyden rank-1 update of J_inv
         dx = V_new - V
         df = F_new - Fval
         denom = dx @ (J_inv @ df)
@@ -178,7 +168,6 @@ def newton_solve(V0, g, J_inv_init=None, max_iter=10):
 
         V, Fval, norm = V_new, F_new, norm_new
 
-        # Stalling: accept if small enough
         if i >= 2 and norm < ACCEPT_TOL:
             return V, norm, i + 1, True, J_inv, refreshed
 
@@ -186,7 +175,6 @@ def newton_solve(V0, g, J_inv_init=None, max_iter=10):
 
 
 def load_reference_data():
-    """Load (g, Delta) reference pairs."""
     ref_path = "tests/fixtures/reference_spectral_data.json"
     if not os.path.exists(ref_path):
         return {}
@@ -201,56 +189,52 @@ def load_reference_data():
 def main():
     ref_dict = load_reference_data()
 
-    # Parse --trim-to=G flag: discard data beyond g=G before continuing
     trim_to = None
     for arg in sys.argv[1:]:
         if arg.startswith("--trim-to="):
             trim_to = float(arg.split("=")[1])
 
-    # Resume or load JAX base data
+    # Resume or bootstrap from cutP=16 scan
     if os.path.exists(SCAN_FILE) and "--fresh" not in sys.argv:
         saved = np.load(SCAN_FILE)
         solved_g = list(saved["g"])
         solved_Delta = list(saved["Delta"])
         solved_phys = list(saved["phys"])
-        print(f"Resumed: {len(solved_g)} pts, g=[{solved_g[0]:.3f}, {solved_g[-1]:.4f}]",
-              flush=True)
-    else:
-        # Load JAX scan data as base (47 good points up to g≈0.152)
-        jax_data = np.load("data/konishi_dense_v2.npz")
-        solved_g = list(jax_data["g"][:47])
-        solved_Delta = list(jax_data["Delta"][:47])
-        solved_phys = list(jax_data["phys"][:47])
-        print(f"Loaded {len(solved_g)} JAX base points, "
+        print(f"Resumed cutP={CUTP} scan: {len(solved_g)} pts, "
               f"g=[{solved_g[0]:.3f}, {solved_g[-1]:.4f}]", flush=True)
+    else:
+        # Bootstrap from cutP=16 scan, padding with zeros
+        base = np.load("data/konishi_mp_scan.npz")
+        solved_g = list(base["g"])
+        solved_Delta = list(base["Delta"])
+        solved_phys = [pad_phys_from_cutP16(p, g)
+                       for p, g in zip(base["phys"], base["g"])]
+        print(f"Bootstrapped from cutP=16: {len(solved_g)} pts, "
+              f"padded to cutP={CUTP}", flush=True)
 
-    # Trim data if requested (for QaiShift upgrade: drop stale high-g points)
     if trim_to is not None:
         n_before = len(solved_g)
         keep = [i for i, gg in enumerate(solved_g) if gg <= trim_to + 1e-6]
         solved_g = [solved_g[i] for i in keep]
         solved_Delta = [solved_Delta[i] for i in keep]
         solved_phys = [solved_phys[i] for i in keep]
-        print(f"Trimmed: {n_before} -> {len(solved_g)} pts, "
-              f"g=[{solved_g[0]:.3f}, {solved_g[-1]:.4f}]", flush=True)
+        print(f"Trimmed: {n_before} -> {len(solved_g)} pts", flush=True)
 
     g = solved_g[-1]
     dg = DG_INIT
     success_count = 0
-    J_inv_current = None  # will be computed on first point
+    J_inv_current = None
     broyden_age = 0
     t_start = time.time()
 
     while g < 1.0:
         g_new = round(g + dg, 6)
 
-        # 4-pt polynomial interpolation → V-space
         pred = poly_interp(solved_g, solved_phys, g_new)
         params_pred = p2i(pred, g_new)
         V_pred = np.array(params_to_V(params_pred, gauge_indices, N0),
                           dtype=np.complex128)
 
-        # Use Broyden if we have a recent J_inv, otherwise FD
         if J_inv_current is None or broyden_age >= MAX_BROYDEN_AGE:
             V_new, norm, _, converged, J_inv_new, _ = newton_solve(
                 V_pred, g_new, J_inv_init=None, max_iter=10
@@ -263,11 +247,9 @@ def main():
                 V_pred, g_new, J_inv_init=J_inv_current, max_iter=8
             )
             J_inv_current = J_inv_new
+            mode = "FD*" if refreshed else "Br"
             if refreshed:
                 broyden_age = 0
-                mode = "FD*"
-            else:
-                mode = "Br"
 
         if converged or norm < ACCEPT_TOL:
             g = g_new
@@ -281,35 +263,29 @@ def main():
             success_count += 1
             broyden_age += 1
 
-            # Adaptive dg: grow after successes
             if success_count > 4 and dg < DG_MAX:
                 dg = min(dg * 1.3, DG_MAX)
                 success_count = 0
 
-            # Report
             ref_val = ref_dict.get(round(g, 2))
             if ref_val and abs(g - round(g, 2)) < 0.003:
                 digits = -math.log10(max(abs(D - ref_val) / abs(ref_val), 1e-16))
-                dt_total = time.time() - t_start
+                dt = time.time() - t_start
                 print(f"g={round(g, 2):.2f}: D={D:.10f} ref={ref_val:.10f} "
                       f"dig={digits:.1f} ||E||={norm:.1e} dg={dg:.4f} "
-                      f"[{mode} {len(solved_g)}pts {dt_total:.0f}s]", flush=True)
+                      f"[{mode} {len(solved_g)}pts {dt:.0f}s]", flush=True)
             elif len(solved_g) % 5 == 0:
-                dt_total = time.time() - t_start
+                dt = time.time() - t_start
                 print(f"g={g:.4f}: D={D:.8f} ||E||={norm:.1e} "
-                      f"dg={dg:.4f} [{mode} {len(solved_g)}pts {dt_total:.0f}s]",
-                      flush=True)
+                      f"dg={dg:.4f} [{mode} {len(solved_g)}pts {dt:.0f}s]", flush=True)
 
-            # Checkpoint every 10 points
             if len(solved_g) % 10 == 0:
-                np.savez(SCAN_FILE,
-                         g=np.array(solved_g),
+                np.savez(SCAN_FILE, g=np.array(solved_g),
                          Delta=np.array(solved_Delta),
                          phys=np.array(solved_phys))
         else:
             dg /= 2
             success_count = 0
-            # Force J refresh on failure
             J_inv_current = None
             broyden_age = 0
             if dg < DG_MIN:
@@ -317,13 +293,11 @@ def main():
                       flush=True)
                 break
 
-    # Final save
-    np.savez(SCAN_FILE,
-             g=np.array(solved_g),
+    np.savez(SCAN_FILE, g=np.array(solved_g),
              Delta=np.array(solved_Delta),
              phys=np.array(solved_phys))
-    dt_total = time.time() - t_start
-    print(f"\nDone: {len(solved_g)} pts in {dt_total:.0f}s, "
+    dt = time.time() - t_start
+    print(f"\nDone: {len(solved_g)} pts in {dt:.0f}s, "
           f"g=[{solved_g[0]:.3f}, {solved_g[-1]:.4f}]", flush=True)
 
 
