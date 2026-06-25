@@ -10,3 +10,6 @@ CLAUDE.local.md
 .venv/
 *.out
 *_build.cpp
+
+# Large MV database notebook (kept locally under reference/, not in git)
+reference/MV_1812.09238/QSCdata.nb

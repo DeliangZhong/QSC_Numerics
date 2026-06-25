@@ -100,5 +100,20 @@ Volin, "QSC as a tool for perturbative QFT").
 - M3: generalize weights/gauge to arbitrary Type I (then II–IV) state.
 Each milestone validated against `data/konishi_sbweak_reference.json` + the fixture.
 
+## QSCsolver.nb (MV ancillary) — API discovered, headless run BLOCKED
+Moved to `reference/MV_1812.09238/` (QSCsolver.nb committed; QSCdata.nb 17MB git-ignored, on disk).
+**API** (state = `{{nb1,nb2},{nf1..nf4},{na1,na2}}`, e.g. `konishi={{0,0},{1,1,1,1},{0,0}}`):
+- `findγ[order][state][sol]` → Δ anomalous-dimension series.
+- `P[a][order][state][sol]`, `Pt[a][...]`, `μ[a,b][...]` → P/μ coefficients per g-order.
+- `beautyQs[state][k]`, `DQ/DQgl4[state]` → leading rational Q-system (Young-diagram QQ closure +
+  `Solve[alleqs==0, allvars]` = the "Zero Remainder Conditions"). Settings: `maxord`, `mode`, `digits`.
+
+**BLOCKER:** running QSCsolver.nb headless via wolframscript fails with
+`"The product exited because of a license error"` at the `DQgl4` `Solve` step — reproducible even at
+maxord=2, defs-only, parallelism disabled. Basic `Solve`/`GroebnerBasis`/`Reduce` work standalone
+(license is Professional v14.3), so it is specific to this computation in headless mode. Options to
+unblock: run QSCsolver.nb interactively in the Mathematica front-end (its intended use); or resolve the
+headless entitlement/parallel-kernel license; or port the algorithm to Python.
+
 ## Validation harness (available now)
 `data/konishi_sbweak_reference.json` (exact reference series) + `tests/fixtures/konishi_internal_params.json` (engine-gauge converged seed at g=0.1) + `qsc/seed/validate_seed.py` (Δ-gated). Capstone proved a reference-quality seed → Δ to 7 digits at iter 0.
