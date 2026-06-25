@@ -42,11 +42,31 @@ The bolded integers are the genuine one-loop data to reproduce. Channel a=1's le
 - `cg[2,2,2] = 3`, `A[2] = 1`
 These suggest the leading c[a,n] are simple functions of A_a (and powP/powQ, B_i) via the MV QQ-relations. DERIVE the exact relation from arXiv:1812.09238 (P↔Q↔c closure) and confirm it reproduces ALL bolded entries before implementing.
 
-## Plan to complete (Task 5)
-1. ~~Pin ν, powQ~~ DONE: `powQ={1,2,−3,−2}` (above).
-2. Obtain the MV leading-order P↔c relation (fetch arXiv:1812.09238 §weak-coupling parametrization; or derive from the QQ-relation + analyticity in the prototype In[43]–In[66]).
-3. Implement `c_lo` in `qsc/seed/lift_lo.py` from the one-loop QQ data + A_a/B_i.
-4. Validate: assembled seed at g=0.1 matches the dominant-channel converged fixture (c[1][1]≈0.319, c[3][1]≈69.89) AND `seed_and_solve` reaches Δ to engine accuracy.
+## CONFIRMED SCOPE (closure extraction, In[43]–In[66])
+The prototype does **not** solve the weak-coupling expansion order-by-order. It builds the full
+residual system `GE = ℱfur[Plist]` (P-ansatz → DoQailarge recursion for B[a,i,n] → SolveQPP
+pulldown → Fourier/Chebyshev gluing `coefpGluing[a] == coefpDef[a]` → excluded/gauge set) and
+**Newton-solves it numerically, seeded by the `.mx` perturbative data** (`Get[fnameA]`). The
+order-by-order algebraic MV *generator* that produced the `.mx` is **NOT in this repository** — it
+is the separate code of arXiv:1812.09238. Therefore a self-contained `c_lo` requires **implementing
+the leading order of the MV algebraic weak-coupling solver** (not extractable from this repo).
+
+Scaffold that IS available (verbatim, usable):
+- P-ansatz In[41]; `slB0` leading-Q relation In[43]; `DoQailarge` B-recursion In[51];
+  gluing `equations` / `coefpGluing`/`coefpDef` In[57]; `CoefsX` Fourier In[56]; Newton In[65–66].
+
+## Plan to complete (Task 5) — focused research-implementation
+1. ~~Pin ν, powQ~~ DONE: `powQ={1,2,−3,−2}`.
+2. Get the MV leading-order construction from arXiv:1812.09238 (weak-coupling P parametrization +
+   the one-loop algebraic solution). Derive the closed-form leading `c[a,n]` for Type I.
+3. Implement `c_lo` in `qsc/seed/lift_lo.py` from the one-loop QQ data + A_a/B_i (DERIVED, not
+   pattern-matched against the integers below).
+4. Validate against: the integer targets in this doc; the dominant-channel converged fixture
+   (c[1][1]≈0.319, c[3][1]≈69.89); and `seed_and_solve` reaching Δ to engine accuracy.
+
+RECOMMENDATION: do this as a fresh focused pass with the paper in hand — it is a real research task,
+not a transcription, and the project's rigor rules forbid coding the observed integer relations
+without a derivation.
 
 ## Validation harness (available now)
 `data/konishi_sbweak_reference.json` (exact reference series) + `tests/fixtures/konishi_internal_params.json` (engine-gauge converged seed at g=0.1) + `qsc/seed/validate_seed.py` (Δ-gated). Capstone proved a reference-quality seed → Δ to 7 digits at iter 0.
