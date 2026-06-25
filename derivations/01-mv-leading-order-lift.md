@@ -68,5 +68,37 @@ RECOMMENDATION: do this as a fresh focused pass with the paper in hand — it is
 not a transcription, and the project's rigor rules forbid coding the observed integer relations
 without a derivation.
 
+## MV framework — verbatim equations (arXiv:1812.09238, confirmed; match our conventions)
+- (40)  `P_a(x) = Σ_{k=λ̂_a}^∞ C_{a,k}/x^k`,  `P^a(x) = Σ_{k=−λ̂_a+1}^∞ C^{a,k}/x^k`.
+  (Our `c[a,n]` are the C_{a,k}; leading term at k=λ̂_a is the A_a piece.)
+- (11a) `λ̂_a = n_f[a] + {2,1,0,−1}_a + Λ ≡ λ0_a + Λ`  ⇒ **= our Mt[a]**. ✓
+  (11b) `ν̂_i|_{g=0} = {−L−n_b, n_a}_i + {−1,−2,1,0}_i − Λ`.
+- (20–21) `P_a ≃ A_a u^{−λ̂_a}`, `P^a ≃ A^a u^{λ̂_a−1}`,
+  `A_a A^a = i ∏_j(λ̂_a+ν̂_j) / ∏_{b≠a}(λ̂_a−λ̂_b)`  ⇒ **= our compute_A AAproduct**. ✓
+- (41) shortening: `n_{f1}=L−1 ⇒ A_1A^1=O(g²)`, `n_{f4}=1 ⇒ A_4A^4=O(g²)`.
+- (19) μ-system: `μ_{ab} − μ_{ab}^{[2]} = P_b P^d μ_{ad}^{[1]} − P_a P^d μ_{bd}^{[1]}`,
+  closed order-by-order by analyticity `μ̃=μ^{[2]}` + maximal-pole-order at u=0 (Sec 3.1);
+  basis = Hurwitz η-functions + MZVs.
+
+## CONFIRMED reproduction scope & sources
+Full reproduction = port the MV algorithm (the **ancillary `QSCsolver.nb`** of arXiv:1812.09238)
+to Python: order-by-order Pμ-system solve with η-function/MZV basis, generalizable to all states.
+Pedagogical leading-order source with explicit Konishi: **arXiv:1411.4758** (Gromov–Levkovich-Maslyuk–
+Volin, "QSC as a tool for perturbative QFT").
+
+### One-loop input (from arXiv:1411.4758, Konishi worked example)
+- **Baxter polynomial `Q(u) = u² − 1/12`** ⇒ Bethe roots `u = ±1/(2√3)` (confirms `oneloop_qq._konishi_oneloop`).
+  This is the rational Q-system output — exactly what `QQ_Galois` provides. L=2, S=2.
+- Asymptotics `P_a ≃ A_a u^{−M_a}`, `M={2,1,0,−1}` (=Mt); normalization gauge `A_1=g²`, `A_2=1`.
+- Both 1411.4758 and 1812.09238 give the leading `P_a` **algorithmically** (iterative solve), not as closed
+  forms ⇒ reproduction = implement the algorithm with the Baxter `Q` as input. No closed-form shortcut.
+
+### Milestone plan (leading order first)
+- M1 (leading/one-loop): build `P_a^{(0)}` from the rational Q-system (Bethe roots / Baxter), read off
+  leading `C_{a,n}^{(0)}`; reproduce integer targets {3,−6,6,24,6}. Source: 1411.4758 Konishi + (20–21).
+- M2: order-by-order μ-system in g with η-basis → reproduce the full `cg[a,k,m]` / Δ-series.
+- M3: generalize weights/gauge to arbitrary Type I (then II–IV) state.
+Each milestone validated against `data/konishi_sbweak_reference.json` + the fixture.
+
 ## Validation harness (available now)
 `data/konishi_sbweak_reference.json` (exact reference series) + `tests/fixtures/konishi_internal_params.json` (engine-gauge converged seed at g=0.1) + `qsc/seed/validate_seed.py` (Δ-gated). Capstone proved a reference-quality seed → Δ to 7 digits at iter 0.
