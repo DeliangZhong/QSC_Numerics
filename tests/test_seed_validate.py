@@ -61,25 +61,43 @@ def test_seed_and_solve_wiring(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_assess_seed_in_basin_flag(monkeypatch):
-    # Produce params[0] = Delta_ref - Delta0 so that Delta == Delta_ref(0.1)
-    delta_ref_01 = delta_reference(0.1)  # ~2.1155...
-    anomalous = delta_ref_01 - KONISHI.Delta0  # = delta_ref_01 - 2
-
-    fake_params = np.array([anomalous + 0j] + [0] * 32, dtype=np.complex128)
+def _patch_solver(monkeypatch, anomalous, residual_norm, converged, iterations=3):
     fake_result = {
-        "params": fake_params,
-        "residual_norm": 0.3,
-        "iterations": 3,
-        "converged": False,
+        "params": np.array([anomalous + 0j] + [0] * 32, dtype=np.complex128),
+        "residual_norm": residual_norm,
+        "iterations": iterations,
+        "converged": converged,
     }
-
     import qsc.seed.validate_seed as vsmod
 
     monkeypatch.setattr(vsmod, "solve_newton_mp", lambda *a, **kw: fake_result)
 
+
+def test_assess_seed_in_basin_when_delta_close_and_residual_at_floor(monkeypatch):
+    # Δ == Δ_ref(0.1) and ‖F‖ at the floor (0.3 < residual_tol=1.0).
+    anomalous = delta_reference(0.1) - KONISHI.Delta0
+    _patch_solver(monkeypatch, anomalous, residual_norm=0.3, converged=False)
+
     out = assess_seed(KONISHI, 0.1)
 
     assert out["in_basin"] is True
-    assert out["delta_err"] is not None
-    assert out["delta_err"] < 1e-3
+    assert out["delta_err"] is not None and out["delta_err"] < 1e-3
+    # transparency fields surfaced even though Newton's own flag is False
+    assert out["converged"] is False
+    assert out["iterations"] == 3
+    assert out["residual_norm"] == 0.3
+
+
+def test_assess_seed_not_in_basin_when_delta_close_but_residual_stalled(monkeypatch):
+    """The decisive negative case: Δ lands within delta_tol of the reference,
+    but ‖F‖ stalled far above the floor (a non-converged / degenerate solve).
+    The gate MUST reject it — the Δ-only gate would have falsely certified it."""
+    # Δ within 1e-3 of the reference but ‖F‖ = 56 (the observed c=0 stall).
+    anomalous = (delta_reference(0.1) - KONISHI.Delta0) + 5e-4
+    _patch_solver(monkeypatch, anomalous, residual_norm=56.0, converged=False)
+
+    out = assess_seed(KONISHI, 0.1)
+
+    assert out["delta_err"] < 1e-3          # Δ alone looks fine ...
+    assert out["residual_norm"] == 56.0     # ... but the solve stalled
+    assert out["in_basin"] is False         # so the gate rejects it

@@ -69,7 +69,7 @@ def seed_and_solve(
 
     Pipeline:
         solve_oneloop_qq(qn)
-        → lift(state, N0, order="LO")
+        → lift(state, N0, order="asymptotic")   # zero-c_lo stub
         → assemble_seed(lift_lo, qn, g, cutP)
         → solve_newton_mp(seed, qn, g, ...)
 
@@ -85,9 +85,11 @@ def seed_and_solve(
     """
     N0 = cutP // 2
 
-    # Build seed from one-loop data.
+    # Build seed from one-loop data.  order="asymptotic" is the explicit
+    # zero-c_lo stub; order="LO" (true Marboe-Volin leading order) is not yet
+    # implemented and would raise.
     state = solve_oneloop_qq(qn)
-    lo = lift(state, N0, order="LO")
+    lo = lift(state, N0, order="asymptotic")
     seed = assemble_seed(lo, qn, g, cutP=cutP)
 
     # Call Newton solver (may be monkeypatched in tests).
@@ -115,12 +117,27 @@ def assess_seed(
     qn: QuantumNumbers,
     g: float,
     delta_tol: float = 1e-3,
+    residual_tol: float = 1.0,
     **kw,
 ) -> dict:
     """Run the reliability assessment for a single (qn, g) point.
 
     Calls :func:`seed_and_solve`, looks up the reference Δ via
     :func:`delta_reference`, and returns a diagnostic dict.
+
+    ``in_basin`` requires BOTH:
+
+    * Δ matches the reference: ``|Δ - Δ_ref| < delta_tol`` (correct branch);
+    * the solve actually settled near the floor: ``‖F‖ < residual_tol``.
+
+    The residual gate is essential because the forward map has a structural
+    ‖F‖ floor (~0.27 at cutP=16) that makes ``result["converged"]`` (which
+    tests ‖F‖ < 1e-10) *permanently False* — so ``converged`` cannot be the
+    success signal.  A *stalled* solve sits at ‖F‖ ~ O(10–100) while a *good*
+    one sits at the floor (~0.27); ``residual_tol`` separates the two.  Without
+    it, a stalled solve whose Δ happens to land within ``delta_tol`` of a
+    reference row would be falsely certified (observed for the c=0 seed at
+    g=0.02: Δ off by 1.2e-4 < 1e-3 yet ‖F‖ = 56).
 
     Parameters
     ----------
@@ -129,7 +146,11 @@ def assess_seed(
     g:
         Coupling constant.
     delta_tol:
-        Tolerance on |Δ - Δ_ref| for the ``in_basin`` flag.
+        Tolerance on |Δ - Δ_ref| for the correct-branch condition.
+    residual_tol:
+        Upper bound on ‖F‖ separating a floor-settled solve from a stall.
+        Default 1.0 is tuned for the validated Konishi/cutP=16 regime (floor
+        ~0.27, stalls ~20–250); tune per cutP/g as the floor grows.
     **kw:
         Forwarded to :func:`seed_and_solve`.
 
@@ -138,19 +159,23 @@ def assess_seed(
     dict with keys:
 
     ``"g"``            – the coupling constant.
-    ``"Delta"``        – Newton's converged Δ estimate.
+    ``"Delta"``        – Newton's Δ estimate.
     ``"Delta_ref"``    – reference Δ from CSV (float or ``None``).
     ``"delta_err"``    – ``|Delta - Delta_ref|`` (float or ``None`` if no ref).
     ``"residual_norm"``– ``‖F‖`` from Newton.
-    ``"in_basin"``     – ``True`` iff ``delta_err < delta_tol``.
+    ``"converged"``    – Newton's own (‖F‖<tol) flag; structurally False here.
+    ``"iterations"``   – Newton iteration count.
+    ``"in_basin"``     – ``True`` iff Δ matches the reference AND ‖F‖ settled
+                         below ``residual_tol``.
     """
     result = seed_and_solve(qn, g, **kw)
     Delta = result["Delta"]
     Delta_ref = delta_reference(g)
+    residual_norm = result["residual_norm"]
 
     if Delta_ref is not None:
         delta_err: float | None = abs(Delta - Delta_ref)
-        in_basin = delta_err < delta_tol
+        in_basin = (delta_err < delta_tol) and (residual_norm < residual_tol)
     else:
         delta_err = None
         in_basin = False
@@ -160,6 +185,8 @@ def assess_seed(
         "Delta": Delta,
         "Delta_ref": Delta_ref,
         "delta_err": delta_err,
-        "residual_norm": result["residual_norm"],
+        "residual_norm": residual_norm,
+        "converged": result.get("converged"),
+        "iterations": result.get("iterations"),
         "in_basin": in_basin,
     }

@@ -34,8 +34,15 @@ def assemble_seed(lift_lo: LiftLO, qn: QuantumNumbers, g: float,
             denorm = 1j * denorm
         params[1 + a * N0: 1 + (a + 1) * N0] = denorm
 
-    # Enforce gauge zeros.
+    # Enforce gauge zeros.  compute_gauge_info indexes the FULL c[a][0..N0]
+    # array (index 0 = the leading A_a term, which forward_map_mp supplies and
+    # which is NOT stored in params).  params hold only c[a][1..N0], so the
+    # full-array index n_idx maps to params offset (n_idx - 1).
     for (a, n_idx) in gauge_indices:
-        params[1 + a * N0 + n_idx] = 0.0
+        if n_idx == 0:
+            # Gauges the A_a term (c[a][0]); not a free parameter in this
+            # layout — handled inside forward_map_mp, nothing to zero here.
+            continue
+        params[1 + a * N0 + (n_idx - 1)] = 0.0
 
     return params
