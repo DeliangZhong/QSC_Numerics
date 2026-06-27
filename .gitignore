@@ -13,3 +13,5 @@ CLAUDE.local.md
 
 # Large MV database notebook (kept locally under reference/, not in git)
 reference/MV_1812.09238/QSCdata.nb
+reference/MV_1812.09238/*.mx
+reference/MV_1812.09238/*.wl
